@@ -1,0 +1,12 @@
+xarray
+dask
+numpy
+pandas
+scipy
+matplotlib
+zarr
+fsspec
+gcsfs
+shapely
+regionmask
+
