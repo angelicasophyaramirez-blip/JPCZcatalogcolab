@@ -16,3 +16,5 @@ Design rule:
 - reusable science logic should live in Python modules instead of being duplicated across notebooks
 - validation notebooks should save short human-readable summaries in `outputs/verification/`
 - the setup notebook should be runnable directly from Colab after replacing the placeholder repository URL
+- Notebook 02 and Notebook 03 now call reusable code in `src/jpcz_catalog/` instead of rebuilding the full workflow from scratch cell by cell
+- Notebook 02 persists the December `D` series to `outputs/verification/december_D_timeseries.nc` so Notebook 03 can restart cleanly in a fresh Colab session

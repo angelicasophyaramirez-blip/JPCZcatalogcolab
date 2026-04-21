@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Final
 
 
 @dataclass(frozen=True)
@@ -12,6 +13,17 @@ class BoundingBox:
     lat_min: float
     lat_max: float
 
+
+@dataclass(frozen=True)
+class GeographicPoint:
+    name: str
+    latitude: float
+    longitude: float
+
+
+ARCO_ERA5_ZARR_STORE: Final[str] = (
+    "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
+)
 
 WORKING_DOMAIN = BoundingBox(
     lon_min=120.0,
@@ -43,6 +55,14 @@ JPCZ_POLYGON_VERTICES = (
     (128.8, 38.0),
 )
 
+SEOUL = GeographicPoint(name="Seoul", latitude=37.5665, longitude=126.9780)
+SAPPORO = GeographicPoint(name="Sapporo", latitude=43.0618, longitude=141.3545)
+
+DECEMBER_BENCHMARK_YEARS: Final[tuple[int, ...]] = tuple(range(2000, 2019))
+BASELINE_START_UTC: Final[str] = "2018-02-02"
+BASELINE_END_UTC: Final[str] = "2018-02-07T23:00:00"
+BASELINE_PEAK_DATE_UTC: Final[str] = "2018-02-03"
+
 EVENT_FIELD_UNITS = {
     "divergence_925hpa": "s^-1",
     "divergence_925hpa_display": "1e-5 s^-1",
@@ -50,4 +70,3 @@ EVENT_FIELD_UNITS = {
     "relative_vorticity_925hpa_display": "1e-5 s^-1",
     "seoul_minus_sapporo_slp": "hPa",
 }
-

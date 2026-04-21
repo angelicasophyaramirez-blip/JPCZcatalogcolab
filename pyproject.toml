@@ -11,11 +11,22 @@ requires-python = ">=3.10"
 authors = [
   { name = "Angelica Ramirez" }
 ]
-dependencies = []
+dependencies = [
+  "fsspec",
+  "gcsfs",
+  "matplotlib",
+  "metpy",
+  "numpy",
+  "pandas",
+  "regionmask",
+  "scipy",
+  "shapely",
+  "xarray",
+  "zarr",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

@@ -9,4 +9,5 @@ fsspec
 gcsfs
 shapely
 regionmask
-
+metpy
+cartopy

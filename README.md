@@ -31,13 +31,18 @@ The project starts by reproducing the Shinoda et al. December event-detection me
 - `docs/validation-plan.md`: benchmark and validation plan
 - `notebooks/README.md`: planned notebook sequence
 - `outputs/verification/README.md`: expected verification artifacts from notebooks
+- `src/jpcz_catalog/era5.py`: cloud ERA5 access helpers
+- `src/jpcz_catalog/masks.py`: polygon and land/ocean mask helpers
+- `src/jpcz_catalog/detect.py`: divergence, rolling-mean, threshold, and event detection logic
+- `src/jpcz_catalog/classify.py`: Shinoda-style monsoon and vorticity classification helpers
+- `src/jpcz_catalog/plotting.py`: reusable plotting helpers for maps and QA time series
+- `src/jpcz_catalog/verification.py`: summary-writing helpers for notebook outputs
 
-## Immediate next build step
+## Current implementation focus
 
-Implement the first notebook and helper modules for:
+The repository now includes the core module structure needed to reproduce the first-pass Colab workflow more stably. The next implementation pass should:
 
-1. opening cloud ERA5 in Colab
-2. building the JPCZ polygon and vorticity box masks
-3. computing hourly 925 hPa divergence and 12-hour means
-4. benchmarking December 2000-2018 event counts against Shinoda before subtype labels are assigned
-5. verifying the 2-7 February 2018 baseline event with a peak on 3 February 2018
+1. keep refining Notebook 02 and Notebook 03 outputs
+2. reduce rerun fragility by persisting intermediate benchmark products when helpful
+3. test finer vorticity-box geometry changes
+4. decide whether the catalog target is strict Shinoda reproduction or an ERA5-adapted operational catalog
