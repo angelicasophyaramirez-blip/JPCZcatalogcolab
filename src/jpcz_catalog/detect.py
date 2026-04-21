@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -11,6 +12,16 @@ import metpy.calc as mpcalc
 from metpy.units import units
 
 from .masks import build_coslat_weights, build_polygon_mask
+
+
+@dataclass(frozen=True)
+class DetectionGeometry:
+    """Reusable grid geometry for repeated divergence calculations."""
+
+    dx: object
+    dy: object
+    polygon_mask: xr.DataArray
+    weights: xr.DataArray
 
 
 def compute_grid_deltas(
@@ -23,14 +34,38 @@ def compute_grid_deltas(
     return mpcalc.lat_lon_grid_deltas(lon_values, lat_values)
 
 
+def prepare_detection_geometry(
+    longitude: xr.DataArray | np.ndarray,
+    latitude: xr.DataArray | np.ndarray,
+    polygon_vertices: Sequence[tuple[float, float]],
+) -> DetectionGeometry:
+    """Precompute reusable geometry for one lat-lon grid."""
+    polygon_mask = build_polygon_mask(longitude, latitude, polygon_vertices)
+    weights = build_coslat_weights(
+        latitude,
+        longitude,
+        mask=polygon_mask,
+    )
+    dx, dy = compute_grid_deltas(longitude, latitude)
+    return DetectionGeometry(
+        dx=dx,
+        dy=dy,
+        polygon_mask=polygon_mask,
+        weights=weights,
+    )
+
+
 def compute_divergence_stack(
     window_ds: xr.Dataset,
     *,
     u_name: str = "u_component_of_wind",
     v_name: str = "v_component_of_wind",
+    dx=None,
+    dy=None,
 ) -> xr.DataArray:
     """Compute hourly 925 hPa divergence over a time window."""
-    dx, dy = compute_grid_deltas(window_ds.longitude, window_ds.latitude)
+    if dx is None or dy is None:
+        dx, dy = compute_grid_deltas(window_ds.longitude, window_ds.latitude)
 
     divergence_stack = []
     for i in range(window_ds.sizes["time"]):
@@ -71,21 +106,24 @@ def compute_rolling_mean(
 
 def compute_polygon_mean_divergence_series(
     window_ds: xr.Dataset,
-    polygon_vertices: Sequence[tuple[float, float]],
+    polygon_vertices: Sequence[tuple[float, float]] | None = None,
+    *,
+    geometry: DetectionGeometry | None = None,
 ) -> tuple[xr.DataArray, xr.DataArray, xr.DataArray]:
     """Compute hourly polygon-mean divergence and Shinoda-style 12-hour mean D."""
     loaded = window_ds.load()
-    div_925 = compute_divergence_stack(loaded)
-    polygon_mask = build_polygon_mask(
-        loaded.longitude,
-        loaded.latitude,
-        polygon_vertices,
-    )
-    weights = build_coslat_weights(
-        loaded.latitude,
-        loaded.longitude,
-        mask=polygon_mask,
-    )
+    if geometry is None:
+        if polygon_vertices is None:
+            raise ValueError("Provide either polygon_vertices or a precomputed geometry.")
+        geometry = prepare_detection_geometry(
+            loaded.longitude,
+            loaded.latitude,
+            polygon_vertices,
+        )
+
+    div_925 = compute_divergence_stack(loaded, dx=geometry.dx, dy=geometry.dy)
+    polygon_mask = geometry.polygon_mask
+    weights = geometry.weights
 
     hourly = (
         (div_925 * weights).sum(dim=("latitude", "longitude"))
@@ -179,4 +217,3 @@ def threshold_sensitivity(
             }
         )
     return pd.DataFrame(rows)
-
