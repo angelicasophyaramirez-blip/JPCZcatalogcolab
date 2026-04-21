@@ -192,3 +192,39 @@ def render_next_steps_summary() -> str:
 ## Important caution
 - Files saved under /content/JPCZcatalog are in the Colab runtime and should be pushed/saved outside the runtime if they need to persist.
 """
+
+
+def render_ndjf_catalog_summary(
+    *,
+    total_events: int,
+    month_threshold_df: pd.DataFrame,
+    catalog_df: pd.DataFrame,
+    title: str = "# NDJF Catalog Summary",
+) -> str:
+    """Render a compact summary for the first-pass NDJF catalog."""
+    lines = [title, "", f"- Total NDJF events: {total_events}", ""]
+    lines.extend(["## Monthly thresholds", month_threshold_df.to_string(index=False), ""])
+
+    if "month" in catalog_df:
+        month_counts = (
+            catalog_df["month"]
+            .value_counts()
+            .sort_index()
+            .rename_axis("month")
+            .to_string()
+        )
+        lines.extend(["## Event counts by month", month_counts, ""])
+
+    if "monsoon_type" in catalog_df:
+        lines.extend(["## Monsoon types", catalog_df["monsoon_type"].value_counts().to_string(), ""])
+
+    if "shinoda_class" in catalog_df:
+        lines.extend(["## Final classes", catalog_df["shinoda_class"].value_counts().to_string(), ""])
+
+    lines.extend(
+        [
+            "Interpretation:",
+            "This NDJF catalog extends the Shinoda-style December detector to November, December, January, and February using the same core divergence logic with month-specific climatological thresholds.",
+        ]
+    )
+    return "\n".join(lines)

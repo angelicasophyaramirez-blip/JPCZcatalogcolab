@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 from collections.abc import Iterable, Sequence
 
 import xarray as xr
@@ -61,6 +62,12 @@ def december_window(year: int) -> tuple[str, str]:
     return f"{year}-12-01", f"{year}-12-31T23:00:00"
 
 
+def month_window(year: int, month: int) -> tuple[str, str]:
+    """Return the start/end slice for one calendar month."""
+    last_day = calendar.monthrange(year, month)[1]
+    return f"{year}-{month:02d}-01", f"{year}-{month:02d}-{last_day:02d}T23:00:00"
+
+
 def iter_december_windows(
     years: Iterable[int] = DECEMBER_BENCHMARK_YEARS,
 ) -> Iterable[tuple[int, str, str]]:
@@ -68,6 +75,17 @@ def iter_december_windows(
     for year in years:
         start, end = december_window(year)
         yield year, start, end
+
+
+def iter_month_windows(
+    years: Iterable[int],
+    months: Iterable[int],
+) -> Iterable[tuple[int, int, str, str]]:
+    """Yield calendar-year/month start/end tuples for month-based catalog runs."""
+    for year in years:
+        for month in months:
+            start, end = month_window(year, month)
+            yield year, month, start, end
 
 
 def open_december_month(
@@ -80,6 +98,27 @@ def open_december_month(
 ) -> xr.Dataset:
     """Open one December analysis window."""
     start, end = december_window(year)
+    return subset_era5_window(
+        ds,
+        start,
+        end,
+        domain=domain,
+        variables=variables,
+        level=level,
+    )
+
+
+def open_month(
+    ds: xr.Dataset,
+    year: int,
+    month: int,
+    *,
+    domain: BoundingBox = WORKING_DOMAIN,
+    variables: Sequence[str] = ANALYSIS_VARIABLES,
+    level: int = 925,
+) -> xr.Dataset:
+    """Open one calendar-month analysis window."""
+    start, end = month_window(year, month)
     return subset_era5_window(
         ds,
         start,
@@ -106,4 +145,3 @@ def open_baseline_window(
         variables=variables,
         level=level,
     )
-

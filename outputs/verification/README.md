@@ -33,4 +33,17 @@ Extended QA artifacts:
 - `next_steps.md`
   - current status and recommended follow-up work
 
+Catalog artifacts:
+
+- `ndjf_events_first_pass.csv`
+  - first-pass NDJF event table before environmental classification
+- `ndjf_monthly_thresholds.csv`
+  - month-specific divergence thresholds used for November, December, January, and February
+- `ndjf_monsoon_thresholds.csv`
+  - month-specific Seoul-minus-Sapporo climatological monsoon thresholds
+- `jpcz_catalog_ndjf.csv`
+  - first-pass classified NDJF master catalog
+- `jpcz_catalog_ndjf_summary.md`
+  - compact summary of the NDJF catalog counts and thresholds
+
 These are verification artifacts, not the final science catalog.

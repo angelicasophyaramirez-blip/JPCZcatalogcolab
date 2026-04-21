@@ -20,3 +20,4 @@ Design rule:
 - Notebook 02 persists the December `D` series to `outputs/verification/december_D_timeseries.nc` so Notebook 03 can restart cleanly in a fresh Colab session
 - Notebook 02 and Notebook 03 can also mirror their key outputs to Google Drive at `/content/drive/MyDrive/JPCZcatalog_outputs` so a Colab disconnect does not wipe out the saved benchmark artifacts
 - Notebook 02 now writes one Drive checkpoint per December year in `JPCZcatalog_outputs/december_yearly/`, so interrupted benchmark runs can resume from the remaining years instead of starting from 2000 again
+- Notebook 04 reuses completed December checkpoints, writes one checkpoint per NDJF month in `JPCZcatalog_outputs/ndjf_monthly/`, and produces the first-pass master catalog at `jpcz_catalog_ndjf.csv`

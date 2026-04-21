@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 from collections.abc import Iterable, Mapping
 
 import numpy as np
@@ -153,6 +154,36 @@ def compute_december_climatological_slp_index(
     mean_value = float(all_dec_slp_index.mean().values)
     std_value = float(all_dec_slp_index.std().values)
     return all_dec_slp_index, mean_value, std_value
+
+
+def compute_month_climatological_slp_index(
+    ds: xr.Dataset,
+    month: int,
+    *,
+    years: Iterable[int] = DECEMBER_BENCHMARK_YEARS,
+    seoul: GeographicPoint = SEOUL,
+    sapporo: GeographicPoint = SAPPORO,
+) -> tuple[xr.DataArray, float, float]:
+    """Compute the 12-hour Seoul-minus-Sapporo climatological index for one month."""
+    monthly_slp_index_series = []
+
+    for year in years:
+        last_day = calendar.monthrange(year, month)[1]
+        msl_month = ds["mean_sea_level_pressure"].sel(
+            time=slice(f"{year}-{month:02d}-01", f"{year}-{month:02d}-{last_day:02d}T23:00:00")
+        )
+
+        seoul_da = nearest_point(msl_month, seoul) / 100.0
+        sapporo_da = nearest_point(msl_month, sapporo) / 100.0
+
+        slp_diff_hourly = (seoul_da - sapporo_da).rename("slp_diff_hpa")
+        slp_diff_12h = slp_diff_hourly.rolling(time=12, min_periods=12).mean().dropna("time").load()
+        monthly_slp_index_series.append(slp_diff_12h)
+
+    all_month_slp_index = xr.concat(monthly_slp_index_series, dim="time").sortby("time")
+    mean_value = float(all_month_slp_index.mean().values)
+    std_value = float(all_month_slp_index.std().values)
+    return all_month_slp_index, mean_value, std_value
 
 
 def assign_shinoda_classes(
@@ -390,4 +421,3 @@ def evaluate_threshold_box_combinations(
         ["type1b_count", "total_events"],
         ascending=[False, True],
     )
-
