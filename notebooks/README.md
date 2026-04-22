@@ -8,7 +8,8 @@ Planned order:
 2. `02_december_benchmark_detector.ipynb`
 3. `03_classification_and_qa.ipynb`
 4. `04_ndjf_catalog.ipynb`
-5. `05_feb2018_baseline_case.ipynb`
+5. `05_manual_verification_and_position.ipynb`
+6. `06_feb2018_baseline_case.ipynb`
 
 Design rule:
 
@@ -21,3 +22,4 @@ Design rule:
 - Notebook 02 and Notebook 03 can also mirror their key outputs to Google Drive at `/content/drive/MyDrive/JPCZcatalog_outputs` so a Colab disconnect does not wipe out the saved benchmark artifacts
 - Notebook 02 now writes one Drive checkpoint per December year in `JPCZcatalog_outputs/december_yearly/`, so interrupted benchmark runs can resume from the remaining years instead of starting from 2000 again
 - Notebook 04 reuses completed December checkpoints, writes one checkpoint per NDJF month in `JPCZcatalog_outputs/ndjf_monthly/`, and produces the first-pass master catalog at `jpcz_catalog_ndjf.csv`
+- Notebook 05 augments the NDJF catalog with peak-position diagnostics, candidate intensity metrics, a manual-review scaffold, and batch quicklook plots for visual event verification

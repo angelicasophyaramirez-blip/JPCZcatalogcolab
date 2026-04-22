@@ -228,3 +228,41 @@ def render_ndjf_catalog_summary(
         ]
     )
     return "\n".join(lines)
+
+
+def render_manual_verification_summary(
+    *,
+    total_events: int,
+    auto_catalog_name: str,
+    scaffold_name: str,
+    plot_dir_name: str,
+    cloud_variable: str | None = None,
+) -> str:
+    """Render a short note describing the manual verification workflow outputs."""
+    cloud_line = (
+        f"- Optional cloud-band field requested: `{cloud_variable}`"
+        if cloud_variable
+        else "- Optional cloud-band field requested: none (wind + convergence quicklooks only)"
+    )
+    return f"""# NDJF Manual Verification Workflow
+
+- Total NDJF events available for review: {total_events}
+- Auto-augmented catalog: `{auto_catalog_name}`
+- Manual verification scaffold: `{scaffold_name}`
+- Quicklook plot directory: `{plot_dir_name}`
+{cloud_line}
+
+Manual review focus:
+- `verified_event`: yes / no / uncertain
+- `cloud_band_present`: yes / no / uncertain
+- `position_group_manual`: e.g. north-shifted / central / south-shifted
+- `manual_peak_convergence_lat`, `manual_peak_convergence_lon`: corrected peak location if needed
+- `upper_level_forcing_note`: short note about jet position / forcing pattern
+- `verification_notes`: freeform event QA notes
+
+Auto-added diagnostics:
+- peak max convergence latitude / longitude
+- convergence centroid latitude / longitude
+- simple north/central/south and west/central/east automatic position groups
+- candidate intensity metrics based on peak convergence, duration, and box-mean vorticity
+"""

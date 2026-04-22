@@ -55,6 +55,40 @@ def prepare_detection_geometry(
     )
 
 
+def compute_divergence_field(
+    ds_time: xr.Dataset,
+    *,
+    u_name: str = "u_component_of_wind",
+    v_name: str = "v_component_of_wind",
+    dx=None,
+    dy=None,
+) -> xr.DataArray:
+    """Compute 925 hPa divergence for one analysis time."""
+    snapshot = ds_time
+    if "time" in snapshot.dims:
+        if snapshot.sizes["time"] != 1:
+            raise ValueError("compute_divergence_field expects a single analysis time.")
+        snapshot = snapshot.isel(time=0, drop=True)
+
+    if dx is None or dy is None:
+        dx, dy = compute_grid_deltas(snapshot.longitude, snapshot.latitude)
+
+    u = snapshot[u_name].values * units("m/s")
+    v = snapshot[v_name].values * units("m/s")
+    div = mpcalc.divergence(u, v, dx=dx, dy=dy).m
+
+    return xr.DataArray(
+        div,
+        coords={
+            "latitude": snapshot.latitude,
+            "longitude": snapshot.longitude,
+        },
+        dims=("latitude", "longitude"),
+        name="divergence_925hpa",
+        attrs={"units": "s^-1", "display_units": "1e-5 s^-1"},
+    )
+
+
 def compute_divergence_stack(
     window_ds: xr.Dataset,
     *,
@@ -69,11 +103,15 @@ def compute_divergence_stack(
 
     divergence_stack = []
     for i in range(window_ds.sizes["time"]):
-        t_ds = window_ds.isel(time=i)
-        u = t_ds[u_name].values * units("m/s")
-        v = t_ds[v_name].values * units("m/s")
-        div = mpcalc.divergence(u, v, dx=dx, dy=dy).m
-        divergence_stack.append(div)
+        divergence_stack.append(
+            compute_divergence_field(
+                window_ds.isel(time=i),
+                u_name=u_name,
+                v_name=v_name,
+                dx=dx,
+                dy=dy,
+            ).values
+        )
 
     return xr.DataArray(
         np.stack(divergence_stack, axis=0),

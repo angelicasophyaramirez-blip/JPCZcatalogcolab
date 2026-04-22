@@ -45,5 +45,13 @@ Catalog artifacts:
   - first-pass classified NDJF master catalog
 - `jpcz_catalog_ndjf_summary.md`
   - compact summary of the NDJF catalog counts and thresholds
+- `jpcz_catalog_ndjf_position_intensity.csv`
+  - NDJF catalog augmented with peak-position diagnostics and candidate intensity metrics
+- `jpcz_catalog_ndjf_manual_verification.csv`
+  - manual-review scaffold with blank yes/no and notes columns layered on the augmented catalog
+- `ndjf_manual_verification_summary.md`
+  - short instructions for the manual verification workflow
+- `ndjf_event_quicklooks/`
+  - saved peak-time verification plots with low-level winds, divergence shading, and optional cloud proxy shading
 
 These are verification artifacts, not the final science catalog.
