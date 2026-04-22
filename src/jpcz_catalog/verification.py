@@ -254,9 +254,12 @@ def render_manual_verification_summary(
 
 Manual review focus:
 - `verified_event`: yes / no / uncertain
-- `cloud_band_present`: yes / no / uncertain
+- `cloud_band_present`: yes / no / uncertain using a cloud proxy such as OLR if available
 - `position_group_manual`: e.g. north-shifted / central / south-shifted
 - `manual_peak_convergence_lat`, `manual_peak_convergence_lon`: corrected peak location if needed
+- `satellite_checked`: yes / no / planned
+- `satellite_cloud_band_match`: yes / no / uncertain
+- `satellite_source`, `satellite_notes`: archive/source and freeform satellite check notes
 - `upper_level_forcing_note`: short note about jet position / forcing pattern
 - `verification_notes`: freeform event QA notes
 

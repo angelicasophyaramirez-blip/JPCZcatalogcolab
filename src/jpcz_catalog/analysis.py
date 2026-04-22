@@ -174,6 +174,10 @@ def build_manual_verification_scaffold(catalog_df: pd.DataFrame) -> pd.DataFrame
         "position_group_manual": "",
         "manual_peak_convergence_lat": pd.NA,
         "manual_peak_convergence_lon": pd.NA,
+        "satellite_checked": "",
+        "satellite_cloud_band_match": "",
+        "satellite_source": "",
+        "satellite_notes": "",
         "upper_level_forcing_note": "",
         "verification_notes": "",
     }
