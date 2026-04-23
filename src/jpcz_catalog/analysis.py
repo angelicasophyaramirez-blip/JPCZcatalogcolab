@@ -147,6 +147,11 @@ def add_candidate_intensity_metrics(catalog_df: pd.DataFrame) -> pd.DataFrame:
     catalog["candidate_peak_duration_vorticity_index"] = (
         catalog["candidate_duration_weighted_convergence"] * positive_vorticity
     )
+    catalog["candidate_peak_convergence_percentile"] = peak_convergence.rank(method="average", pct=True) * 100.0
+    catalog["convergence_intensity_auto"] = _assign_tercile_labels(
+        peak_convergence,
+        labels=("low-convergence", "moderate-convergence", "high-convergence"),
+    )
 
     return catalog
 
@@ -172,6 +177,7 @@ def build_manual_verification_scaffold(catalog_df: pd.DataFrame) -> pd.DataFrame
         "verified_event": "",
         "cloud_band_present": "",
         "position_group_manual": "",
+        "convergence_intensity_manual": "",
         "manual_peak_convergence_lat": pd.NA,
         "manual_peak_convergence_lon": pd.NA,
         "satellite_checked": "",
