@@ -235,6 +235,96 @@ def count_events_from_threshold(D_series: xr.DataArray, threshold: float) -> pd.
     return detect_threshold_events(D_series, threshold)
 
 
+def merge_nearby_events(
+    events_df: pd.DataFrame,
+    *,
+    max_gap_hours: float,
+) -> pd.DataFrame:
+    """Merge adjacent events separated by small threshold-free gaps.
+
+    The merged event keeps the strongest-peak row as the representative
+    environment/classification record, while broadening the event start/end
+    window to cover the full episode.
+    """
+    if events_df.empty:
+        return events_df.copy()
+
+    events = events_df.copy()
+    for column_name in ("event_start", "event_end", "event_peak"):
+        events[column_name] = pd.to_datetime(events[column_name])
+
+    events = events.sort_values("event_start").reset_index(drop=True)
+
+    clusters: list[list[int]] = [[0]]
+    for idx in range(1, len(events)):
+        previous_end = events.loc[clusters[-1][-1], "event_end"]
+        current_start = events.loc[idx, "event_start"]
+        gap_hours = (current_start - previous_end).total_seconds() / 3600.0
+        if gap_hours <= max_gap_hours:
+            clusters[-1].append(idx)
+        else:
+            clusters.append([idx])
+
+    merged_rows: list[pd.Series] = []
+    for cluster in clusters:
+        cluster_df = events.loc[cluster].copy()
+        peak_idx = cluster_df["event_peak_D_s-1"].astype(float).idxmin()
+        merged_row = cluster_df.loc[peak_idx].copy()
+
+        event_start = cluster_df["event_start"].iloc[0]
+        event_end = cluster_df["event_end"].iloc[-1]
+        internal_gaps = (
+            cluster_df["event_start"].iloc[1:].reset_index(drop=True)
+            - cluster_df["event_end"].iloc[:-1].reset_index(drop=True)
+        ).dt.total_seconds() / 3600.0
+
+        episode_span_hours = int((event_end - event_start).total_seconds() / 3600.0) + 1
+        threshold_hit_hours = int(pd.to_numeric(cluster_df["duration_hours"]).sum())
+
+        merged_row["event_start"] = event_start
+        merged_row["event_end"] = event_end
+        merged_row["duration_hours"] = episode_span_hours
+        merged_row["episode_span_hours"] = episode_span_hours
+        merged_row["threshold_hit_hours"] = threshold_hit_hours
+        merged_row["merged_subevents_count"] = int(len(cluster_df))
+        merged_row["total_internal_gap_hours"] = float(internal_gaps.sum()) if len(internal_gaps) else 0.0
+        merged_row["max_internal_gap_hours"] = float(internal_gaps.max()) if len(internal_gaps) else 0.0
+
+        merged_rows.append(merged_row)
+
+    merged_df = pd.DataFrame(merged_rows).sort_values("event_start").reset_index(drop=True)
+    return merged_df
+
+
+def merge_gap_sensitivity(
+    events_df: pd.DataFrame,
+    *,
+    gap_hours_values: Iterable[float] = (6, 12, 24),
+) -> pd.DataFrame:
+    """Summarize how the event count changes under different merge gaps."""
+    rows = [
+        {
+            "gap_hours": 0.0,
+            "event_count": int(len(events_df)),
+            "events_merged": 0,
+        }
+    ]
+
+    baseline_count = len(events_df)
+    for gap_hours in gap_hours_values:
+        merged_df = merge_nearby_events(events_df, max_gap_hours=gap_hours)
+        merged_count = len(merged_df)
+        rows.append(
+            {
+                "gap_hours": float(gap_hours),
+                "event_count": int(merged_count),
+                "events_merged": int(baseline_count - merged_count),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
 def threshold_sensitivity(
     D_series: xr.DataArray,
     n_std_values: Iterable[float],

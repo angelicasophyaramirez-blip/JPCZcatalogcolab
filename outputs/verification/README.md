@@ -45,6 +45,12 @@ Catalog artifacts:
   - first-pass classified NDJF master catalog
 - `jpcz_catalog_ndjf_summary.md`
   - compact summary of the NDJF catalog counts and thresholds
+- `jpcz_catalog_ndjf_gap_merge_sensitivity.csv`
+  - event-count sensitivity table for merging short gaps between adjacent NDJF events
+- `jpcz_catalog_ndjf_merged_12h.csv`
+  - recommended broad-episode catalog produced by merging adjacent events separated by 12 hours or less
+- `jpcz_catalog_ndjf_merged_12h_summary.md`
+  - short explanation of the merge sensitivity and the recommended merged catalog
 - `jpcz_catalog_ndjf_position_intensity.csv`
   - NDJF catalog augmented with peak-position diagnostics and candidate intensity metrics
 - `jpcz_catalog_ndjf_manual_verification.csv`

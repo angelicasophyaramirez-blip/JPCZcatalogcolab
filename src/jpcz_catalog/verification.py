@@ -269,3 +269,40 @@ Auto-added diagnostics:
 - simple north/central/south and west/central/east automatic position groups
 - candidate intensity metrics based on peak convergence, duration, and box-mean vorticity
 """
+
+
+def render_gap_merge_summary(
+    *,
+    sensitivity_df: pd.DataFrame,
+    recommended_gap_hours: float,
+    merged_catalog_name: str,
+) -> str:
+    """Render a compact summary for gap-merged catalog candidates."""
+    recommended_row = sensitivity_df.loc[sensitivity_df["gap_hours"] == recommended_gap_hours]
+    recommended_count = (
+        int(recommended_row["event_count"].iloc[0])
+        if not recommended_row.empty
+        else None
+    )
+
+    lines = [
+        "# NDJF Gap-Merge Sensitivity",
+        "",
+        "The raw NDJF detector groups only strictly consecutive hourly threshold hits.",
+        "This sensitivity table shows how many events remain after merging adjacent events separated by small threshold-free gaps.",
+        "",
+        sensitivity_df.to_string(index=False),
+        "",
+        f"Recommended candidate: merge gaps <= {recommended_gap_hours:.0f} hours",
+    ]
+    if recommended_count is not None:
+        lines.append(f"- Resulting event count: {recommended_count}")
+    lines.extend(
+        [
+            f"- Output catalog: `{merged_catalog_name}`",
+            "",
+            "Interpretation:",
+            "A short-gap merge broadens the catalog from threshold-hit fragments toward synoptic episodes without rerunning the expensive ERA5 detection workflow.",
+        ]
+    )
+    return "\n".join(lines)
