@@ -170,6 +170,22 @@ def add_position_group_columns(catalog_df: pd.DataFrame) -> pd.DataFrame:
     return catalog
 
 
+def add_japan_local_time_columns(catalog_df: pd.DataFrame) -> pd.DataFrame:
+    """Add JST timestamps and peak JST hour for quick review and diurnal analysis."""
+    catalog = catalog_df.copy()
+    jst_offset = pd.Timedelta(hours=9)
+
+    for column_name in ("event_start", "event_end", "event_peak"):
+        if column_name in catalog.columns:
+            catalog[column_name] = pd.to_datetime(catalog[column_name])
+            catalog[f"{column_name}_jst"] = catalog[column_name] + jst_offset
+
+    if "event_peak_jst" in catalog.columns:
+        catalog["event_peak_jst_hour"] = catalog["event_peak_jst"].dt.hour
+
+    return catalog
+
+
 def build_manual_verification_scaffold(catalog_df: pd.DataFrame) -> pd.DataFrame:
     """Add blank manual-review columns while preserving the auto diagnostics."""
     scaffold = catalog_df.copy()
@@ -177,6 +193,7 @@ def build_manual_verification_scaffold(catalog_df: pd.DataFrame) -> pd.DataFrame
         "verified_event": "",
         "cloud_band_present": "",
         "position_group_manual": "",
+        "pattern_type_manual": "",
         "convergence_intensity_manual": "",
         "manual_peak_convergence_lat": pd.NA,
         "manual_peak_convergence_lon": pd.NA,
