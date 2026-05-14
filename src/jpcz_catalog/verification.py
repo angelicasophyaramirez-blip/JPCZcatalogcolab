@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from .radiation import AUTO_ERA5_OLR_TOKEN
+
 
 def write_text_summary(path: str | Path, text: str) -> Path:
     """Write a summary text file and return its path."""
@@ -239,6 +241,8 @@ def render_manual_verification_summary(
     cloud_variable: str | None = None,
 ) -> str:
     """Render a short note describing the manual verification workflow outputs."""
+    if cloud_variable == AUTO_ERA5_OLR_TOKEN:
+        cloud_variable = "ERA5-derived OLR auto-detect"
     cloud_line = (
         f"- Optional cloud-band field requested: `{cloud_variable}`"
         if cloud_variable
