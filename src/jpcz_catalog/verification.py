@@ -244,9 +244,9 @@ def render_manual_verification_summary(
     if cloud_variable == AUTO_ERA5_OLR_TOKEN:
         cloud_variable = "ERA5-derived OLR auto-detect"
     cloud_line = (
-        f"- Optional cloud-band field requested: `{cloud_variable}`"
+        f"- ERA5 OLR cloud-proxy panel: `{cloud_variable}`"
         if cloud_variable
-        else "- Optional cloud-band field requested: none (wind + convergence quicklooks only)"
+        else "- ERA5 OLR cloud-proxy panel: none (wind + convergence quicklooks only)"
     )
     return f"""# NDJF Manual Verification Workflow
 
@@ -254,6 +254,7 @@ def render_manual_verification_summary(
 - Auto-augmented catalog: `{auto_catalog_name}`
 - Manual verification scaffold: `{scaffold_name}`
 - Quicklook plot directory: `{plot_dir_name}`
+- Satellite truth panel: MODIS daily true color when available
 {cloud_line}
 
 Manual review focus:
