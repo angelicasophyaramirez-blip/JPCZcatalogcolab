@@ -29,6 +29,7 @@ The project starts by reproducing the Shinoda et al. December event-detection me
 - `docs/detector-spec.md`: event-definition and threshold rules
 - `docs/colab-workflow.md`: Colab-first architecture and cloud data workflow
 - `docs/validation-plan.md`: benchmark and validation plan
+- `docs/objective-subtype-design.md`: objective subtype and clustering design notes
 - `notebooks/README.md`: planned notebook sequence
 - `outputs/verification/README.md`: expected verification artifacts from notebooks
 - `src/jpcz_catalog/era5.py`: cloud ERA5 access helpers
