@@ -43,6 +43,8 @@ The first objective clustering experiment should focus on:
 - frontal or baroclinic forcing from `850 hPa` temperature-gradient magnitude
 - optionally low-level circulation from `del cross u`
 
+The first clustering notebook should test a small range of cluster counts such as `k = 2` through `k = 6` instead of assuming one correct answer from the start. It should report simple quality diagnostics such as mean silhouette score, smallest cluster size, and largest cluster size before choosing a first-pass solution for interpretation.
+
 ## Feature naming rules
 
 Feature names should be explicit enough that they are still understandable later without referring back to notebook code.

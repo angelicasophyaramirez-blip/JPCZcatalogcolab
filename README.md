@@ -36,6 +36,7 @@ The project starts by reproducing the Shinoda et al. December event-detection me
 - `src/jpcz_catalog/masks.py`: polygon and land/ocean mask helpers
 - `src/jpcz_catalog/detect.py`: divergence, rolling-mean, threshold, and event detection logic
 - `src/jpcz_catalog/classify.py`: Shinoda-style monsoon and vorticity classification helpers
+- `src/jpcz_catalog/subtypes.py`: objective subtype feature engineering, PCA, and clustering helpers
 - `src/jpcz_catalog/plotting.py`: reusable plotting helpers for maps and QA time series
 - `src/jpcz_catalog/verification.py`: summary-writing helpers for notebook outputs
 

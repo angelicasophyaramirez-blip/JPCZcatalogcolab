@@ -46,6 +46,51 @@ VORTICITY_BOX = BoundingBox(
     lat_max=45.5,
 )
 
+# First-pass characterization regions for objective subtype analysis.
+# These do not affect event detection; they only describe where convergence
+# and forcing are strongest after the Shinoda-style catalog has been built.
+COASTAL_JAPAN_BOX = BoundingBox(
+    lon_min=131.0,
+    lon_max=140.0,
+    lat_min=34.0,
+    lat_max=40.5,
+)
+
+PACIFIC_EAST_OF_JAPAN_BOX = BoundingBox(
+    lon_min=141.0,
+    lon_max=150.0,
+    lat_min=33.0,
+    lat_max=42.0,
+)
+
+HOKKAIDO_BOX = BoundingBox(
+    lon_min=139.0,
+    lon_max=146.5,
+    lat_min=41.0,
+    lat_max=46.5,
+)
+
+SEA_OF_JAPAN_BOX = BoundingBox(
+    lon_min=129.0,
+    lon_max=140.0,
+    lat_min=36.0,
+    lat_max=45.0,
+)
+
+HOKKAIDO_FRONT_BOX = BoundingBox(
+    lon_min=136.0,
+    lon_max=147.0,
+    lat_min=39.0,
+    lat_max=47.0,
+)
+
+PACIFIC_FRONT_BOX = BoundingBox(
+    lon_min=141.0,
+    lon_max=151.0,
+    lat_min=33.0,
+    lat_max=42.0,
+)
+
 # First-pass digitization from Shinoda Figure 2. These values are intended
 # to be refined only if validation indicates a clear mismatch.
 JPCZ_POLYGON_VERTICES = (
@@ -68,5 +113,7 @@ EVENT_FIELD_UNITS = {
     "divergence_925hpa_display": "1e-5 s^-1",
     "relative_vorticity_925hpa": "s^-1",
     "relative_vorticity_925hpa_display": "1e-5 s^-1",
+    "geopotential_height_anomaly_850hpa": "gpm",
+    "temperature_gradient_850hpa_display": "K (100 km)^-1",
     "seoul_minus_sapporo_slp": "hPa",
 }

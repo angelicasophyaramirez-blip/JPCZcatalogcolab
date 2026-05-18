@@ -10,7 +10,8 @@ Planned order:
 4. `04_ndjf_catalog.ipynb`
 5. `05_manual_verification_and_position.ipynb`
 6. `06_gap_merge_catalog.ipynb`
-7. `07_feb2018_baseline_case.ipynb`
+7. `07_event_diagnostic_atlas.ipynb`
+8. `08_objective_subtype_features.ipynb`
 
 Design rule:
 
@@ -25,3 +26,5 @@ Design rule:
 - Notebook 04 reuses completed December checkpoints, writes one checkpoint per NDJF month in `JPCZcatalog_outputs/ndjf_monthly/`, and produces the first-pass master catalog at `jpcz_catalog_ndjf.csv`
 - Notebook 05 augments the NDJF catalog with peak-position diagnostics, candidate intensity metrics, a manual-review scaffold, and batch quicklook plots for visual event verification
 - Notebook 06 merges nearby NDJF threshold fragments into broader synoptic episodes using configurable small-gap rules such as 6 h, 12 h, and 24 h
+- Notebook 07 provides an event-by-event diagnostic atlas for convergence, satellite, OLR, and synoptic interpretation
+- Notebook 08 builds the first objective subtype feature table and runs first-pass 2D, 3D, PCA, and hierarchical-clustering experiments
