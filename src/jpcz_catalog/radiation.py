@@ -42,7 +42,7 @@ def era5_olr_like_field(snapshot: xr.Dataset, variable_name: str) -> tuple[xr.Da
         olr_like = (-field).rename("era5_olr_like")
         olr_like.attrs["units"] = "W m^-2"
         olr_like.attrs["display_units"] = "W m^-2"
-        label = f"ERA5 OLR proxy ({variable_name})"
+        label = f"ERA5 OLR proxy [W m^-2] ({variable_name})"
         return olr_like.load(), label
 
     if variable_name in {"top_net_thermal_radiation", "ttr"}:
@@ -52,7 +52,7 @@ def era5_olr_like_field(snapshot: xr.Dataset, variable_name: str) -> tuple[xr.Da
         olr_like = (-(field / scale)).rename("era5_olr_like")
         olr_like.attrs["units"] = "W m^-2" if scale != 1.0 else field.attrs.get("units", "")
         olr_like.attrs["display_units"] = "W m^-2"
-        label = f"ERA5 OLR proxy ({variable_name})"
+        label = f"ERA5 OLR proxy [W m^-2] ({variable_name})"
         return olr_like.load(), label
 
     return field.load(), variable_name
