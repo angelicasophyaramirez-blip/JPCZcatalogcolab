@@ -12,10 +12,10 @@ import xarray as xr
 from .analysis import load_event_peak_snapshot
 from .config import (
     COASTAL_JAPAN_BOX,
-    EXTENDED_DOMAIN,
     HOKKAIDO_BOX,
     HOKKAIDO_FRONT_BOX,
     JPCZ_POLYGON_VERTICES,
+    OBJECTIVE_SUBTYPE_DOMAIN,
     PACIFIC_EAST_OF_JAPAN_BOX,
     PACIFIC_FRONT_BOX,
     SEA_OF_JAPAN_BOX,
@@ -212,7 +212,7 @@ def compute_monthly_geopotential_height_climatology(
     *,
     years: Iterable[int],
     months: Iterable[int] = (11, 12, 1, 2),
-    domain: BoundingBox = EXTENDED_DOMAIN,
+    domain: BoundingBox = OBJECTIVE_SUBTYPE_DOMAIN,
     level: int = 850,
     z_name: str = "geopotential",
 ) -> xr.DataArray:
@@ -226,6 +226,7 @@ def compute_monthly_geopotential_height_climatology(
 
         for year in years:
             start, end = month_window(year, month)
+            print(f"Climatology month {month:02d}: loading {year}-{month:02d}")
             subset = ds[[z_name]].sel(
                 time=slice(start, end),
                 longitude=slice(domain.lon_min, domain.lon_max),
@@ -267,7 +268,7 @@ def build_objective_subtype_feature_table(
     catalog_df: pd.DataFrame,
     *,
     z850_climatology: xr.DataArray,
-    characterization_domain: BoundingBox = EXTENDED_DOMAIN,
+    characterization_domain: BoundingBox = OBJECTIVE_SUBTYPE_DOMAIN,
     polygon_vertices: Sequence[tuple[float, float]] = JPCZ_POLYGON_VERTICES,
     coastal_box: BoundingBox = COASTAL_JAPAN_BOX,
     pacific_box: BoundingBox = PACIFIC_EAST_OF_JAPAN_BOX,

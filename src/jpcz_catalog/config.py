@@ -39,6 +39,17 @@ EXTENDED_DOMAIN = BoundingBox(
     lat_max=50.0,
 )
 
+# Tighter domain for objective subtype characterization and clustering.
+# This still covers the JPCZ polygon plus the coastal, Pacific, Hokkaido,
+# Sea of Japan, and frontal characterization regions, while reducing
+# Colab memory pressure compared with the larger EXTENDED_DOMAIN.
+OBJECTIVE_SUBTYPE_DOMAIN = BoundingBox(
+    lon_min=129.0,
+    lon_max=151.0,
+    lat_min=33.0,
+    lat_max=47.0,
+)
+
 VORTICITY_BOX = BoundingBox(
     lon_min=127.0,
     lon_max=140.0,
