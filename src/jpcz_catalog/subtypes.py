@@ -217,10 +217,14 @@ def compute_monthly_geopotential_height_climatology(
     z_name: str = "geopotential",
 ) -> xr.DataArray:
     """Compute monthly mean 850 hPa geopotential height climatology."""
-    monthly_windows = []
+    monthly_sums: dict[int, xr.DataArray] = {}
+    monthly_counts: dict[int, int] = {}
 
-    for year in years:
-        for month in months:
+    for month in months:
+        month_sum = None
+        month_count = 0
+
+        for year in years:
             start, end = month_window(year, month)
             subset = ds[[z_name]].sel(
                 time=slice(start, end),
@@ -231,13 +235,31 @@ def compute_monthly_geopotential_height_climatology(
             if "level" in subset.dims or "level" in subset.coords:
                 subset = subset.sel(level=level)
 
-            monthly_windows.append(subset[z_name] / 9.80665)
+            geopotential_height = subset[z_name] / 9.80665
+            window_sum = geopotential_height.sum("time").load()
+            window_count = int(geopotential_height.sizes["time"])
 
-    combined = xr.concat(monthly_windows, dim="time")
-    climatology = combined.groupby("time.month").mean("time").rename("monthly_z850_climatology")
+            if month_sum is None:
+                month_sum = window_sum
+            else:
+                month_sum = month_sum + window_sum
+            month_count += window_count
+
+        if month_sum is None or month_count == 0:
+            continue
+
+        monthly_sums[int(month)] = month_sum
+        monthly_counts[int(month)] = month_count
+
+    climatology_slices = []
+    for month in sorted(monthly_sums):
+        month_mean = (monthly_sums[month] / monthly_counts[month]).expand_dims(month=[month])
+        climatology_slices.append(month_mean)
+
+    climatology = xr.concat(climatology_slices, dim="month").rename("monthly_z850_climatology")
     climatology.attrs["units"] = "gpm"
     climatology.attrs["display_units"] = "gpm"
-    return climatology.load()
+    return climatology
 
 
 def build_objective_subtype_feature_table(
@@ -254,6 +276,7 @@ def build_objective_subtype_feature_table(
     front_box: BoundingBox = HOKKAIDO_FRONT_BOX,
     pacific_front_box: BoundingBox = PACIFIC_FRONT_BOX,
     offset_hours: Sequence[int] = (-12, 0, 12),
+    progress_every: int = 10,
 ) -> pd.DataFrame:
     """Build the event-level objective subtype feature table."""
     catalog = catalog_df.copy()
@@ -264,7 +287,9 @@ def build_objective_subtype_feature_table(
     geometry_925 = None
     records: list[dict[str, object]] = []
 
-    for idx, row in catalog.iterrows():
+    total_events = len(catalog)
+
+    for event_number, (idx, row) in enumerate(catalog.iterrows(), start=1):
         peak_snapshot_925 = load_event_peak_snapshot(
             ds,
             row["event_peak"],
@@ -357,6 +382,11 @@ def build_objective_subtype_feature_table(
             }
         )
         records.append(record)
+
+        if progress_every > 0 and (event_number % progress_every == 0 or event_number == total_events):
+            print(
+                f"Built objective subtype features for {event_number}/{total_events} events"
+            )
 
     return pd.DataFrame(records, index=catalog.index)
 
