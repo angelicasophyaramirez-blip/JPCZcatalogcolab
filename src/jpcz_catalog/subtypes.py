@@ -287,6 +287,9 @@ def build_objective_subtype_feature_table(
 
     geometry_925 = None
     records: list[dict[str, object]] = []
+    available_climatology_months = {
+        int(month_value) for month_value in z850_climatology["month"].values.tolist()
+    }
 
     total_events = len(catalog)
 
@@ -337,6 +340,12 @@ def build_objective_subtype_feature_table(
 
         for offset in offset_hours:
             synoptic_time = pd.Timestamp(row["event_peak"]) + pd.Timedelta(hours=offset)
+            if synoptic_time.month not in available_climatology_months:
+                raise KeyError(
+                    "Monthly z850 climatology is missing month "
+                    f"{synoptic_time.month}. Available months: "
+                    f"{sorted(available_climatology_months)}"
+                )
             synoptic_snapshot_850 = load_offset_snapshot(
                 ds,
                 row["event_peak"],
