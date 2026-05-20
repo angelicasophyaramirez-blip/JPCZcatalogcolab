@@ -13,6 +13,7 @@ Planned order:
 7. `07_event_diagnostic_atlas.ipynb`
 8. `08_objective_subtype_features.ipynb`
 9. `09_cluster_validation_and_significance.ipynb`
+10. `10_cluster_composites_and_examples.ipynb`
 
 Design rule:
 
@@ -30,3 +31,4 @@ Design rule:
 - Notebook 07 provides an event-by-event diagnostic atlas for convergence, satellite, OLR, and synoptic interpretation
 - Notebook 08 builds the first objective subtype feature table and runs first-pass 2D, 3D, PCA, and hierarchical-clustering experiments
 - Notebook 09 validates the `k = 2, 3, 4` subtype solutions using permutation-null silhouettes, resampling stability, and external-variable significance tests
+- Notebook 10 turns the validated `k = 3` working subtype framework into representative-event tables and peak-time physical composite maps
