@@ -268,7 +268,125 @@ The clustering workflow should be:
 5. test clustering algorithms such as:
    - hierarchical clustering
    - Gaussian mixture clustering
-6. test several cluster counts such as `k = 3`, `4`, `5`, and `6`
+6. test several cluster counts such as `k = 2`, `3`, `4`, `5`, and `6`
+
+## Implemented first-pass math in Notebook 08
+
+The current first-pass objective subtype workflow in `Notebook 08` uses one event-level feature vector per event and applies Ward hierarchical clustering to the standardized feature table.
+
+### Step 1. Build one feature vector per event
+
+For the current first-pass subtype experiment, each event is represented by four clustering features:
+
+- `coastal_to_jpcz_mean_convergence_ratio`
+- `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
+- `front_box_max_temp_gradient_850_tminus12_to_tplus12`
+- `sea_of_japan_mean_vorticity_peak_925`
+
+For event `i`, the feature vector is:
+
+- `x_i = [x_i1, x_i2, x_i3, x_i4]`
+
+### Step 2. Standardize each feature with a z score
+
+The clustering does not operate on the raw units directly. Each feature is standardized column by column:
+
+- `z_ij = (x_ij - mu_j) / sigma_j`
+
+where:
+
+- `x_ij` is feature `j` for event `i`
+- `mu_j` is the feature mean over all events
+- `sigma_j` is the feature standard deviation over all events
+
+This prevents a feature with larger raw numerical range, such as geopotential-height anomaly, from dominating the distance calculation only because of its units.
+
+### Step 3. Compute Euclidean distances in standardized feature space
+
+After standardization, each event is a point in a four-dimensional feature space. The distance between events `a` and `b` is:
+
+- `d(a, b) = sqrt(sum_j((z_aj - z_bj)^2))`
+
+This Euclidean distance is the distance measure used in the clustering and silhouette calculations.
+
+### Step 4. Apply Ward hierarchical clustering
+
+The implemented clustering method is hierarchical clustering with Ward linkage.
+
+Conceptually:
+
+- begin with each event as its own cluster
+- repeatedly merge the pair of clusters that causes the smallest increase in within-cluster variance
+- continue until the tree can be cut at the requested cluster count `k`
+
+For two candidate clusters `A` and `B`, Ward's merge cost is:
+
+- `Delta(A, B) = (n_A * n_B / (n_A + n_B)) * ||mu_A - mu_B||^2`
+
+where:
+
+- `n_A`, `n_B` are cluster sizes
+- `mu_A`, `mu_B` are cluster centroids in standardized feature space
+
+### Step 5. Cut the hierarchy at a chosen cluster count
+
+After the hierarchy is built, it is cut at a requested cluster count such as `k = 2`, `3`, or `4`. This assigns each event one cluster label for that solution.
+
+The current comparison workflow in `Notebook 08` recomputes and saves the `k = 2`, `3`, and `4` solutions from the same fixed standardized feature table so that the outputs are directly comparable.
+
+### Step 6. Evaluate each solution with silhouette score
+
+For each event `i`, define:
+
+- `a_i` = mean distance from event `i` to other events in its own cluster
+- `b_i` = mean distance from event `i` to the nearest competing cluster
+
+The silhouette value for event `i` is:
+
+- `s_i = (b_i - a_i) / max(a_i, b_i)`
+
+Interpretation:
+
+- values near `1` indicate a well-separated event
+- values near `0` indicate overlap between clusters
+- values below `0` suggest the event may fit another cluster better
+
+The notebook reports the mean silhouette score over all events for each tested `k`.
+
+### Step 7. Summarize each cluster with medians in physical units
+
+After labels are assigned, each cluster is summarized using medians of the raw event-level feature columns and additional diagnostic columns.
+
+This is important because:
+
+- clustering is performed on standardized variables
+- physical interpretation should still be done in the original physical units
+
+So the cluster median tables are the main science interpretation tables.
+
+### Step 8. Use PCA only for visualization
+
+Principal component analysis is used only to visualize the structure of the same standardized feature table in lower dimensions.
+
+If the standardized feature matrix is `X`, singular value decomposition gives:
+
+- `X = U * Sigma * V^T`
+
+The PCA score matrix is:
+
+- `T = X * V_k`
+
+The explained variance ratio for principal component `j` is:
+
+- `sigma_j^2 / sum_l(sigma_l^2)`
+
+where `sigma_j` is the singular value for component `j`.
+
+In this workflow:
+
+- `PC1`, `PC2`, and `PC3` are used to make PCA scatterplots
+- PCA is not the clustering method itself
+- PCA is a visualization and dimensionality-compression step only
 
 ## How success should be judged
 
