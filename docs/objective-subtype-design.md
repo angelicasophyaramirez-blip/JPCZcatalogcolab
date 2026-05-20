@@ -399,6 +399,19 @@ Success should be evaluated by:
 - physical interpretability of the cluster composites
 - post hoc comparison with subjective satellite-based notes
 
+## Validation after exploratory clustering
+
+After the first exploratory clustering pass, the next step should be a dedicated validation workflow rather than continuing to overload the feature-construction notebook.
+
+That validation workflow should test:
+
+- whether the observed silhouette is stronger than a shuffled-null feature structure
+- whether the clustering is stable under repeated event resampling
+- whether the clusters differ on external variables that were not used directly in the clustering
+- whether intermediate and strong synoptic subdivisions, such as cluster 2 versus cluster 3 in a `k = 3` solution, remain distinguishable on outside variables
+
+In the current project layout, this validation step belongs in `Notebook 09` rather than in the feature-building and exploratory clustering notebook.
+
 ## Role of subjective interpretation
 
 Subjective notes remain valuable, but they are not the clustering target.

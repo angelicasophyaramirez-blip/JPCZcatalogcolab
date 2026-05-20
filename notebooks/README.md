@@ -12,6 +12,7 @@ Planned order:
 6. `06_gap_merge_catalog.ipynb`
 7. `07_event_diagnostic_atlas.ipynb`
 8. `08_objective_subtype_features.ipynb`
+9. `09_cluster_validation_and_significance.ipynb`
 
 Design rule:
 
@@ -28,3 +29,4 @@ Design rule:
 - Notebook 06 merges nearby NDJF threshold fragments into broader synoptic episodes using configurable small-gap rules such as 6 h, 12 h, and 24 h
 - Notebook 07 provides an event-by-event diagnostic atlas for convergence, satellite, OLR, and synoptic interpretation
 - Notebook 08 builds the first objective subtype feature table and runs first-pass 2D, 3D, PCA, and hierarchical-clustering experiments
+- Notebook 09 validates the `k = 2, 3, 4` subtype solutions using permutation-null silhouettes, resampling stability, and external-variable significance tests

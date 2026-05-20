@@ -576,6 +576,231 @@ def evaluate_hierarchical_cluster_solutions(
     return pd.DataFrame(rows)
 
 
+def compute_permutation_silhouette_null(
+    standardized_df: pd.DataFrame,
+    *,
+    n_clusters: int,
+    method: str = "ward",
+    n_permutations: int = 200,
+    random_seed: int = 42,
+) -> pd.DataFrame:
+    """Estimate a null distribution for silhouette by permuting each feature column."""
+    valid = standardized_df.dropna(axis=0, how="any")
+    if valid.empty:
+        raise ValueError("No complete rows are available for permutation testing.")
+
+    rng = np.random.default_rng(random_seed)
+    observed_labels = assign_hierarchical_clusters(
+        valid,
+        n_clusters=n_clusters,
+        method=method,
+    )
+    observed_score = compute_mean_silhouette_score(valid, observed_labels)
+
+    rows = [
+        {
+            "replicate": -1,
+            "kind": "observed",
+            "silhouette_score": float(observed_score),
+        }
+    ]
+
+    for replicate in range(n_permutations):
+        permuted = valid.copy()
+        for column_name in permuted.columns:
+            permuted[column_name] = rng.permutation(permuted[column_name].to_numpy())
+
+        permuted_labels = assign_hierarchical_clusters(
+            permuted,
+            n_clusters=n_clusters,
+            method=method,
+        )
+        permuted_score = compute_mean_silhouette_score(permuted, permuted_labels)
+        rows.append(
+            {
+                "replicate": int(replicate),
+                "kind": "permuted",
+                "silhouette_score": float(permuted_score),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def compute_resampled_cluster_stability(
+    standardized_df: pd.DataFrame,
+    *,
+    n_clusters: int,
+    method: str = "ward",
+    n_resamples: int = 200,
+    sample_fraction: float = 0.8,
+    random_seed: int = 42,
+) -> pd.DataFrame:
+    """Estimate clustering stability with repeated subsampling and adjusted Rand index."""
+    from sklearn.metrics import adjusted_rand_score
+
+    valid = standardized_df.dropna(axis=0, how="any")
+    if valid.empty:
+        raise ValueError("No complete rows are available for stability analysis.")
+
+    if not (0.0 < sample_fraction <= 1.0):
+        raise ValueError("sample_fraction must be between 0 and 1.")
+
+    baseline_labels = assign_hierarchical_clusters(
+        valid,
+        n_clusters=n_clusters,
+        method=method,
+    )
+
+    rng = np.random.default_rng(random_seed)
+    indices = valid.index.to_numpy()
+    sample_size = max(n_clusters * 2, int(round(sample_fraction * len(indices))))
+    sample_size = min(sample_size, len(indices))
+
+    rows = []
+    for replicate in range(n_resamples):
+        sampled_indices = rng.choice(indices, size=sample_size, replace=False)
+        subset = valid.loc[sampled_indices]
+        subset_labels = assign_hierarchical_clusters(
+            subset,
+            n_clusters=n_clusters,
+            method=method,
+        )
+        baseline_subset = baseline_labels.loc[subset.index]
+        ari = adjusted_rand_score(
+            baseline_subset.to_numpy(dtype=int),
+            subset_labels.to_numpy(dtype=int),
+        )
+        subset_silhouette = compute_mean_silhouette_score(subset, subset_labels)
+        rows.append(
+            {
+                "replicate": int(replicate),
+                "n_sampled_events": int(sample_size),
+                "adjusted_rand_index": float(ari),
+                "subset_silhouette_score": float(subset_silhouette),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def compute_cluster_kruskal_wallis_table(
+    feature_df: pd.DataFrame,
+    *,
+    cluster_column: str,
+    variables: Sequence[str],
+) -> pd.DataFrame:
+    """Run Kruskal-Wallis tests for a list of variables across cluster groups."""
+    from scipy.stats import kruskal
+
+    rows = []
+    valid_clusters = feature_df.loc[feature_df[cluster_column].notna()].copy()
+    if valid_clusters.empty:
+        raise ValueError(f"No non-null labels found in {cluster_column}.")
+
+    for variable in variables:
+        subset = valid_clusters.loc[:, [cluster_column, variable]].copy()
+        subset[variable] = pd.to_numeric(subset[variable], errors="coerce")
+        subset = subset.dropna()
+        cluster_ids = sorted(pd.unique(subset[cluster_column]))
+        groups = [subset.loc[subset[cluster_column] == cluster_id, variable].to_numpy() for cluster_id in cluster_ids]
+        groups = [group for group in groups if len(group) > 0]
+
+        if len(groups) < 2:
+            statistic = float("nan")
+            p_value = float("nan")
+        else:
+            statistic, p_value = kruskal(*groups)
+
+        rows.append(
+            {
+                "cluster_column": cluster_column,
+                "variable": variable,
+                "n_groups": int(len(groups)),
+                "n_complete_rows": int(len(subset)),
+                "kruskal_statistic": float(statistic),
+                "p_value": float(p_value),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def compute_pairwise_mannwhitney_table(
+    feature_df: pd.DataFrame,
+    *,
+    cluster_column: str,
+    variables: Sequence[str],
+    cluster_pairs: Sequence[tuple[int | float, int | float]],
+) -> pd.DataFrame:
+    """Run pairwise Mann-Whitney U tests for selected cluster pairs and variables."""
+    from scipy.stats import mannwhitneyu
+
+    rows = []
+    valid_clusters = feature_df.loc[feature_df[cluster_column].notna()].copy()
+    if valid_clusters.empty:
+        raise ValueError(f"No non-null labels found in {cluster_column}.")
+
+    for variable in variables:
+        subset = valid_clusters.loc[:, [cluster_column, variable]].copy()
+        subset[variable] = pd.to_numeric(subset[variable], errors="coerce")
+        subset = subset.dropna()
+
+        for left_cluster, right_cluster in cluster_pairs:
+            left_values = subset.loc[subset[cluster_column] == left_cluster, variable].to_numpy()
+            right_values = subset.loc[subset[cluster_column] == right_cluster, variable].to_numpy()
+
+            if len(left_values) == 0 or len(right_values) == 0:
+                statistic = float("nan")
+                p_value = float("nan")
+            else:
+                statistic, p_value = mannwhitneyu(
+                    left_values,
+                    right_values,
+                    alternative="two-sided",
+                )
+
+            rows.append(
+                {
+                    "cluster_column": cluster_column,
+                    "variable": variable,
+                    "left_cluster": left_cluster,
+                    "right_cluster": right_cluster,
+                    "n_left": int(len(left_values)),
+                    "n_right": int(len(right_values)),
+                    "mannwhitney_u": float(statistic),
+                    "p_value": float(p_value),
+                    "left_median": float(np.nanmedian(left_values)) if len(left_values) else float("nan"),
+                    "right_median": float(np.nanmedian(right_values)) if len(right_values) else float("nan"),
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def benjamini_hochberg_adjust(p_values: Sequence[float | int | np.floating]) -> np.ndarray:
+    """Apply Benjamini-Hochberg false-discovery-rate adjustment."""
+    values = np.asarray(p_values, dtype=float)
+    adjusted = np.full(values.shape, np.nan, dtype=float)
+    finite_mask = np.isfinite(values)
+    if not finite_mask.any():
+        return adjusted
+
+    finite_values = values[finite_mask]
+    order = np.argsort(finite_values)
+    ranked = finite_values[order]
+    n = len(ranked)
+
+    scaled = ranked * n / np.arange(1, n + 1)
+    monotonic = np.minimum.accumulate(scaled[::-1])[::-1]
+    monotonic = np.clip(monotonic, 0.0, 1.0)
+
+    restored = np.empty_like(monotonic)
+    restored[order] = monotonic
+    adjusted[finite_mask] = restored
+    return adjusted
+
+
 def _safe_ratio(numerator: float, denominator: float) -> float:
     if pd.isna(numerator) or pd.isna(denominator) or denominator == 0:
         return float("nan")
