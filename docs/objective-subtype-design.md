@@ -25,6 +25,23 @@ The project now has two separate layers.
 - The core detector remains the `12 h` mean polygon-mean `925 hPa` divergence metric `D`.
 - The merged NDJF catalog remains the working event list.
 
+Implemented detector math:
+
+- For one `925 hPa` ERA5 snapshot, horizontal divergence is computed as:
+  - `div925 = du/dx + dv/dy`
+- The horizontal derivatives are evaluated on the lat-lon ERA5 grid using finite differences from the local grid spacing.
+- In the current implementation, grid spacing is computed with `lat_lon_grid_deltas`, then divergence is evaluated with MetPy's finite-difference divergence operator.
+- The detector time series is the polygon-area-weighted mean divergence:
+  - `D_hourly(t) = mean_polygon(div925(t))`
+- The Shinoda-style event detector then applies a `12 h` rolling mean:
+  - `D_12h(t) = rolling_mean_12h(D_hourly(t))`
+- Threshold events are defined from negative anomalies of this polygon-mean divergence metric.
+
+Important distinction:
+
+- The detection metric `D` is a polygon-mean divergence series.
+- The subtype-characterization convergence fields used later are derived from the same divergence calculation, but are converted to positive-only convergence magnitude for event interpretation.
+
 ### Characterization layer
 
 - Additional boxes or polygons may be defined to describe where the strongest convergence occurs and whether synoptic forcing is present.
@@ -78,7 +95,10 @@ Calculation:
 
 - Compute `925 hPa` divergence from hourly ERA5 `u` and `v`.
 - Multiply by `-1` so positive values represent convergence magnitude.
+- Clip positive-divergence values below `0` so the field becomes:
+  - `conv925 = max(-(du/dx + dv/dy), 0)`
 - Summarize the convergence field only within the original JPCZ polygon.
+- Use cosine-latitude area weighting for means.
 
 Units:
 
@@ -88,6 +108,14 @@ Units:
 Purpose:
 
 - Quantifies the strength of convergence in the canonical JPCZ detection region.
+
+Current zero and missing-data handling:
+
+- Real zeros produced by the positive-only convergence definition are included in spatial means.
+- Missing values outside the polygon or outside a selected box are masked before the weighted average is taken.
+- In the current implementation, masked missing values are filled with `0` after masking and multiplied by the region weights, so only in-region cells contribute to the weighted sum.
+- This rule is applied consistently across polygon and box means.
+- A later sensitivity experiment should compare this current implementation against an alternate treatment to quantify whether zero-handling materially changes the subtype results.
 
 ### 2. Coastal-Japan convergence
 
@@ -242,7 +270,7 @@ Recommended first-pass feature set:
 This first experiment is designed to test:
 
 - polygon-centered versus coastal-enhanced convergence
-- mesoscale versus synoptic forcing
+- lower versus higher synoptic forcing
 - frontal influence versus non-frontal influence
 - optional circulation-centered structure
 
@@ -256,6 +284,22 @@ Before formal clustering, make event-level scatterplots such as:
 4. `sea_of_japan_mean_vorticity_peak_925` versus `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
 
 These plots should be inspected before clustering to see whether any natural separation exists.
+
+The current first-pass scatterplot set uses the following pairings:
+
+1. `coastal_to_jpcz_mean_convergence_ratio` versus `jpcz_polygon_max_convergence_peak_925`
+2. `coastal_to_jpcz_mean_convergence_ratio` versus `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
+3. `pacific_to_jpcz_mean_convergence_ratio` versus `front_box_max_temp_gradient_850_tminus12_to_tplus12`
+4. `sea_of_japan_mean_vorticity_peak_925` versus `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
+
+These are not the clustering themselves. They are raw event-level views of the original physical feature space:
+
+- convergence location versus polygon-core strength
+- convergence location versus synoptic-height forcing
+- Pacific coupling versus frontality
+- Sea of Japan circulation versus synoptic-height forcing
+
+The scatterplots matter because they show whether physical structure is already visible before any dimensionality reduction or clustering is applied.
 
 ## Clustering workflow
 
@@ -286,6 +330,23 @@ For the current first-pass subtype experiment, each event is represented by four
 For event `i`, the feature vector is:
 
 - `x_i = [x_i1, x_i2, x_i3, x_i4]`
+
+Physical mapping of the four clustering axes:
+
+- `coastal_to_jpcz_mean_convergence_ratio`
+  - convergence-location axis
+  - Coastal Japan box versus JPCZ polygon
+- `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
+  - synoptic-height-forcing axis
+  - Hokkaido box
+- `front_box_max_temp_gradient_850_tminus12_to_tplus12`
+  - frontality axis
+  - Hokkaido front box
+- `sea_of_japan_mean_vorticity_peak_925`
+  - Sea of Japan circulation axis
+  - Sea of Japan box
+
+These variables were selected because they represent different physical mechanisms and are less redundant than using many closely related convergence-only metrics at once.
 
 ### Step 2. Standardize each feature with a z score
 
@@ -387,6 +448,51 @@ In this workflow:
 - `PC1`, `PC2`, and `PC3` are used to make PCA scatterplots
 - PCA is not the clustering method itself
 - PCA is a visualization and dimensionality-compression step only
+
+What the principal components represent:
+
+- The variance here is the variance of the standardized event-by-feature matrix `X`, where rows are events and columns are the four standardized clustering features.
+- `PC1` is the linear combination of the standardized clustering features that explains the largest fraction of total event-to-event variance.
+- `PC2` is the next orthogonal linear combination that explains the next-largest fraction.
+- `PC3` is the third orthogonal linear combination.
+- Because the workflow uses four clustering features, PCA can in principle produce up to four components; the notebook currently visualizes the first three because they capture most of the standardized variance.
+
+Current interpretation guidance:
+
+- `PC1`, `PC2`, and `PC3` should be understood first as statistical axes of variation in the standardized feature table.
+- They are not separate physical fields and they are not the clustering algorithm.
+- Their physical meaning depends on the feature loadings on each component.
+- In the current workflow, PCA is used to visualize the same structure already present in the raw scatterplots and clustering table, not to define the clusters.
+
+Relation between raw scatterplots and PCA:
+
+- The first-pass scatterplots show the event cloud in the original physical variables.
+- PCA rotates and compresses that same cloud into orthogonal axes of variance.
+- The clustering is performed on the standardized four-feature table itself, not on subjective labels and not on manually drawn PCA groups.
+
+Current practical interpretation of the first three components:
+
+- `PC1` likely captures the dominant broad contrast across the four clustering variables, especially the low-synoptic versus higher-synoptic part of the event continuum.
+- `PC2` and `PC3` capture additional orthogonal structure within that continuum, including how circulation, frontality, and coastal enhancement covary once the main broad contrast is removed.
+- A more explicit physical interpretation of `PC1`, `PC2`, and `PC3` should eventually be based on saved PCA loading tables, not just the scatterplots.
+
+### Step 9. Interpret the working clusters
+
+The cluster labels themselves are algorithmic identifiers, not physical quantities.
+
+For the current validated `k = 3` working solution:
+
+- `Cluster 1`
+  - least synoptic or weaker-background group
+  - lower coastal enhancement, weaker Sea of Japan circulation, and weaker synoptic-height forcing
+- `Cluster 2`
+  - moderately synoptic or circulation-modified group
+  - intermediate synoptic forcing and circulation strength
+- `Cluster 3`
+  - strongly synoptic, frontal, and coastal-enhanced group
+  - stronger synoptic-height depression, stronger frontality, and stronger convergence/circulation signatures
+
+These physical labels are post hoc interpretations of the objective cluster medians and validation tests. They are not used as clustering inputs.
 
 ## How success should be judged
 
