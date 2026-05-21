@@ -22,25 +22,42 @@ The project now has two separate layers.
 ### Detection layer
 
 - Event detection remains tied to the existing JPCZ polygon.
-- The core detector remains the `12 h` mean polygon-mean `925 hPa` divergence metric `D`.
+- The core detector remains the `12 h` mean polygon-area-mean `925 hPa` divergence metric `D`.
 - The merged NDJF catalog remains the working event list.
 
 Implemented detector math:
 
-- For one `925 hPa` ERA5 snapshot, horizontal divergence is computed as:
+- For one hourly ERA5 `925 hPa` wind snapshot, horizontal divergence is computed at every grid cell as:
   - `div925 = du/dx + dv/dy`
-- The horizontal derivatives are evaluated on the lat-lon ERA5 grid using finite differences from the local grid spacing.
-- In the current implementation, grid spacing is computed with `lat_lon_grid_deltas`, then divergence is evaluated with MetPy's finite-difference divergence operator.
-- The detector time series is the polygon-area-weighted mean divergence:
-  - `D_hourly(t) = mean_polygon(div925(t))`
-- The Shinoda-style event detector then applies a `12 h` rolling mean:
+- Here:
+  - `du/dx` is the east-west derivative of the zonal wind
+  - `dv/dy` is the north-south derivative of the meridional wind
+- The derivatives are evaluated on the native lat-lon ERA5 grid using local grid spacing from `lat_lon_grid_deltas`.
+- In the current implementation, the finite-difference derivatives are evaluated with MetPy's divergence operator, so the result is a full gridded divergence field with units of `s^-1`.
+- A fixed polygon mask is then applied using the original Shinoda-style JPCZ polygon.
+- Inside that polygon, the detector builds an hourly polygon-area-mean divergence series:
+  - `D_hourly(t) = area_mean_polygon(div925(t))`
+- The spatial mean is cosine-latitude weighted so that grid cells are area weighted rather than counted equally by row.
+- The event detector then computes the Shinoda-style `12 h` rolling mean:
   - `D_12h(t) = rolling_mean_12h(D_hourly(t))`
-- Threshold events are defined from negative anomalies of this polygon-mean divergence metric.
+- Because the detector is based on divergence, more negative `D_12h` values correspond to stronger polygon-mean convergence.
+- The threshold is computed from the full valid `D_12h` series as:
+  - `threshold = mean(D_12h) - 2 * std(D_12h)`
+- An event is identified wherever the `12 h` polygon-mean divergence series drops below that threshold.
+- Consecutive below-threshold hours are grouped into one event.
+- For each grouped event:
+  - `event_start` = first below-threshold time
+  - `event_end` = last below-threshold time
+  - `event_peak` = time of the minimum `D_12h` value within that grouped event
+  - `event_peak_D` = minimum `D_12h` value within that grouped event
+- The merged NDJF catalog later broadens nearby threshold fragments into larger synoptic episodes, but the core event membership still originates from this polygon-mean divergence-threshold process.
 
 Important distinction:
 
-- The detection metric `D` is a polygon-mean divergence series.
-- The subtype-characterization convergence fields used later are derived from the same divergence calculation, but are converted to positive-only convergence magnitude for event interpretation.
+- The detection metric `D` is a polygon-mean divergence series, not a convergence-magnitude field.
+- The subtype-characterization convergence fields used later start from the same divergence calculation, but then convert it into positive-only convergence magnitude for spatial interpretation:
+  - `conv925 = max(-div925, 0)`
+- So the detector uses negative divergence directly, while the subtype characterization uses a derived positive-only convergence field.
 
 ### Characterization layer
 
