@@ -4,6 +4,12 @@
 
 Detect major JPCZ events in a way that is faithful to Shinoda et al. while adapting the workflow from WRF output to cloud-accessed ERA5.
 
+Important reproduction principle:
+
+- The Shinoda method is the conceptual detector framework.
+- The exact finite-difference implementation on the ERA5 grid is ours.
+- So this workflow should be described as a faithful ERA5 implementation of the Shinoda detector logic, not as a verbatim copy of every unpublished numerical implementation detail from the paper.
+
 ## Core Shinoda event metric
 
 Primary field:
@@ -20,6 +26,31 @@ Primary event metric:
 - area-mean `925 hPa horizontal divergence` within the JPCZ detection polygon
 - computed from hourly data
 - converted to `12-hour mean` values, denoted here as `D`
+
+Clean distinction:
+
+What Shinoda did:
+
+- detect major JPCZ events from polygon-mean `925 hPa` horizontal divergence
+- use `12 h` mean values
+- identify major events when the polygon-mean divergence becomes anomalously negative
+
+What we do to reproduce that logic in ERA5:
+
+- compute gridded divergence from ERA5 winds:
+  - `div925 = du/dx + dv/dy`
+- use finite differences on the ERA5 grid
+- apply our digitized Shinoda polygon mask
+- compute the cosine-latitude-weighted polygon mean:
+  - `D_hourly(t) = sum(mask * cos(lat) * div925) / sum(mask * cos(lat))`
+- compute the trailing `12 h` rolling mean:
+  - `D_12h(t_k) = (1 / 12) * sum_{m=0}^{11} D_hourly(t_{k-m})`
+- threshold:
+  - `threshold = mean(D_12h) - 2 * std(D_12h)`
+- group consecutive threshold hits into raw events
+- merge nearby raw fragments if the quiet gap is `<= 12 h`
+
+So the workflow is Shinoda-style because the detection logic is preserved, while the gridded numerical implementation is ours.
 
 More explicitly:
 

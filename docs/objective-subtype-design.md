@@ -25,6 +25,12 @@ The project now has two separate layers.
 - The core detector remains the `12 h` mean polygon-area-mean `925 hPa` divergence metric `D`.
 - The merged NDJF catalog remains the working event list.
 
+Detector-reproduction principle:
+
+- The Shinoda method is the conceptual detector framework.
+- The exact finite-difference implementation on the ERA5 grid is ours.
+- So the current catalog should be described as a faithful ERA5 implementation of the Shinoda detector logic rather than a claim that every unpublished low-level numerical choice from the original workflow is known exactly.
+
 What Shinoda did conceptually:
 
 - Start with hourly `925 hPa` horizontal divergence.
@@ -42,6 +48,31 @@ What this project does in direct ERA5 implementation:
 - Threshold the smoothed series using `mean - 2 * std`.
 - Group consecutive threshold hits into raw detector events.
 - Merge short-gap fragments into broader NDJF episodes with the gap-merging workflow from `Notebook 06`.
+
+Clean distinction:
+
+What Shinoda did:
+
+- detect major JPCZ events from polygon-mean `925 hPa` horizontal divergence
+- use `12 h` mean values
+- identify major events when the polygon-mean divergence becomes anomalously negative
+
+What we do to reproduce that in ERA5:
+
+- compute gridded divergence from ERA5 winds:
+  - `div925 = du/dx + dv/dy`
+- use finite differences on the ERA5 grid
+- apply our digitized Shinoda polygon mask
+- compute the cosine-latitude-weighted polygon mean:
+  - `D_hourly(t) = sum(mask * cos(lat) * div925) / sum(mask * cos(lat))`
+- compute the trailing `12 h` rolling mean:
+  - `D_12h(t_k) = (1 / 12) * sum_{m=0}^{11} D_hourly(t_{k-m})`
+- threshold:
+  - `threshold = mean(D_12h) - 2 * std(D_12h)`
+- group consecutive threshold hits into raw events
+- merge nearby raw fragments if the quiet gap is `<= 12 h`
+
+So yes, the detector is Shinoda-style, but it is Shinoda-style because the major-event logic is preserved, not because the paper provided every exact low-level implementation detail.
 
 Implemented detector math:
 
@@ -593,15 +624,30 @@ These physical labels are post hoc interpretations of the objective cluster medi
 
 After `Notebook 09` validates `k = 3` as the working subtype framework, `Notebook 10` moves from event-level scalar summaries to full gridded composite maps.
 
+### Composite principle
+
+- The composite maps are not composites of the cluster variables themselves.
+- The composite maps are composites of the full gridded physical fields used to calculate the cluster-defining event summaries.
+- The primary composite stage uses only the validated `k = 3` framework:
+  - `Cluster 1`
+  - `Cluster 2`
+  - `Cluster 3`
+- The `k = 4` solution is not the main composite target.
+
 ### What is composited
 
-The primary composite notebook uses three gridded physical fields, each composited separately for `Cluster 1`, `Cluster 2`, and `Cluster 3`:
+There are nine primary composite maps:
+
+- `3` variables times `3` clusters
+- equivalently, `3` maps per cluster for `Cluster 1`, `Cluster 2`, and `Cluster 3`
+
+The three physical fields are:
 
 1. `925 hPa` convergence at the event peak time
 2. `850 hPa` geopotential-height anomaly minimum over `t-12`, `t0`, `t+12`
 3. `850 hPa` temperature-gradient magnitude maximum over `t-12`, `t0`, `t+12`
 
-These are intended to be gridded analogs of the scalar subtype-physics variables used in clustering.
+These are intended to be the full-domain gridded analogs of the physical ingredients used to define the cluster space.
 
 ### Composite-field formulas
 
@@ -618,6 +664,13 @@ For event `n`:
   - primary composite field:
     - `tempgrad_max_n(i, j) = max_{t in [-12, 0, +12]} |grad T850|_n(i, j, t)`
 
+### Full-domain requirement
+
+- These gridded fields are computed at every grid point across the full objective-subtype study domain.
+- They are not restricted to the characterization boxes.
+- They are not reduced to pre-aggregated scalar summaries before compositing.
+- The characterization boxes are retained only for later comparison diagnostics.
+
 ### Pointwise composite mean
 
 For cluster `c` and field `F_n(i, j)`:
@@ -629,6 +682,13 @@ For cluster `c` and field `F_n(i, j)`:
 where the sums run only over events assigned to cluster `c`.
 
 This is a full-domain pointwise mean at every grid cell, not a box-average-only product.
+
+Equivalently, for each cluster:
+
+- compute the full gridded field for every event assigned to that cluster
+- then, at each grid cell, average the field value across the `N` events in that cluster
+
+That pointwise averaging step is what produces the `9` primary full-grid maps.
 
 ### Pointwise sample counts and standard deviations
 
@@ -652,9 +712,19 @@ The composite notebook uses the following rule consistently:
 
 - include zeros if they are real physical values
 - exclude only missing values from the numerator and denominator
+- apply that same rule across every process in the composite workflow
 
 So if a grid cell is valid and the convergence there is exactly `0`, that zero remains in the composite.
 If a grid cell is missing, it does not contribute to `Sum_c(i, j)` or `N_c(i, j)`.
+
+This same rule should be used consistently for:
+
+- the pointwise cluster means
+- the pointwise count maps
+- the pointwise standard-deviation maps
+- the event-level box means
+- the cluster-level box summaries
+- any later difference-map calculations derived from those same composite fields
 
 ### Box-average outputs saved alongside the full maps
 
@@ -691,6 +761,8 @@ The notebook also saves difference maps such as:
 - `Cluster 2 - Cluster 1`
 
 These are not a new clustering step. They are simply pairwise differences between already-computed cluster-mean fields.
+
+The same notebook may also save pointwise standard-deviation fields so the spread across events can be assessed directly alongside the mean composites.
 
 ## How success should be judged
 
