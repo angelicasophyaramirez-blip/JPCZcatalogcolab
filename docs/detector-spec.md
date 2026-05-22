@@ -21,6 +21,21 @@ Primary event metric:
 - computed from hourly data
 - converted to `12-hour mean` values, denoted here as `D`
 
+More explicitly:
+
+- at each hourly time step, compute a full gridded `925 hPa` divergence field
+  - `div925 = du/dx + dv/dy`
+- on the ERA5 lat-lon grid, the finite-difference idea is:
+  - `du/dx(i, j) ~= (u(i, j+1) - u(i, j-1)) / (x(i, j+1) - x(i, j-1))`
+  - `dv/dy(i, j) ~= (v(i+1, j) - v(i-1, j)) / (y(i+1, j) - y(i-1, j))`
+- the code uses MetPy's divergence operator together with ERA5 grid spacing from `lat_lon_grid_deltas`, so the implementation handles the exact grid-metric details on the native ERA5 mesh
+- then apply the polygon mask and compute the hourly polygon-area-mean series:
+  - `D_hourly(t) = sum_ij(mask(i, j) * cos(lat_i) * div925(i, j, t)) / sum_ij(mask(i, j) * cos(lat_i))`
+- then compute the trailing `12 h` rolling mean:
+  - `D_12h(t_k) = (1 / 12) * sum_{m=0}^{11} D_hourly(t_{k-m})`
+- example:
+  - `D_12h(2018-02-03 12:00 UTC)` is the mean of the hourly polygon-mean divergence values from `2018-02-03 01:00 UTC` through `2018-02-03 12:00 UTC`
+
 Major-event threshold:
 
 - flag a major JPCZ event when:
@@ -62,6 +77,13 @@ Status:
 - they are not printed in the paper
 - they will be tuned only if the December benchmark clearly disagrees with Shinoda
 
+Applied mask meaning:
+
+- build a boolean `latitude x longitude` array on the ERA5 grid
+- set `mask(i, j) = 1` if the grid-cell center `(lon_j, lat_i)` falls inside the polygon
+- set `mask(i, j) = 0` otherwise
+- only the `mask = 1` cells contribute to the polygon-area-mean detector metric
+
 ### 3. Relative-vorticity box
 
 The paper also defines a dashed rectangle in Figure 2 for vorticity classification. Initial prototype rectangle:
@@ -91,6 +113,11 @@ Open implementation detail:
 - first implementation should use a trailing 12-hour rolling mean labeled by the window end time
 - if event timing appears systematically shifted in validation, revisit this convention
 
+Current implementation choice:
+
+- use the trailing, end-labeled convention described above
+- require all `12` hourly values to be present before a `D_12h` value is emitted
+
 ## Event grouping
 
 If the major-event threshold is met at consecutive time steps:
@@ -98,6 +125,28 @@ If the major-event threshold is met at consecutive time steps:
 - treat the consecutive windows as one event
 - assign the event timestamp to the time of peak convergence
 - peak convergence means the most negative `D` within the run
+
+To avoid splitting one broader synoptic episode into many weakening-and-reforming fragments, the NDJF workflow then performs a second merge step:
+
+- sort the raw threshold events by start time
+- compute the quiet gap between one event end and the next event start
+- if the gap is less than or equal to the chosen merge threshold, merge them into one event
+- the current recommended merge threshold is `12 h`
+
+Example:
+
+- raw event A ends at `06:00 UTC`
+- raw event B starts at `15:00 UTC`
+- gap = `9 h`
+- because `9 <= 12`, merge A and B into one broader episode
+
+For the merged event:
+
+- `event_start` = start of the first raw fragment
+- `event_end` = end of the last raw fragment
+- `event_peak` = time of the most negative `D_12h` across all merged fragments
+- `threshold_hit_hours` = sum of hours actually below threshold
+- `duration_hours` = total span of the merged episode, including internal above-threshold gaps
 
 Recommended event table fields:
 

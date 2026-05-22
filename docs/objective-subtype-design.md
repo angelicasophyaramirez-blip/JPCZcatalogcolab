@@ -25,6 +25,24 @@ The project now has two separate layers.
 - The core detector remains the `12 h` mean polygon-area-mean `925 hPa` divergence metric `D`.
 - The merged NDJF catalog remains the working event list.
 
+What Shinoda did conceptually:
+
+- Start with hourly `925 hPa` horizontal divergence.
+- Average that divergence over one fixed JPCZ polygon.
+- Convert the hourly polygon-mean series to `12 h` mean values.
+- Define major events where the `12 h` polygon-mean divergence becomes anomalously negative relative to its own climatology.
+
+What this project does in direct ERA5 implementation:
+
+- Use hourly ERA5 `u` and `v` winds at `925 hPa`.
+- Compute a full gridded divergence field at every hourly time step.
+- Apply a fixed polygon mask corresponding to the digitized Shinoda JPCZ polygon.
+- Compute an area-weighted polygon mean of that gridded divergence field.
+- Apply a trailing `12 h` rolling mean to that hourly polygon-mean series.
+- Threshold the smoothed series using `mean - 2 * std`.
+- Group consecutive threshold hits into raw detector events.
+- Merge short-gap fragments into broader NDJF episodes with the gap-merging workflow from `Notebook 06`.
+
 Implemented detector math:
 
 - For one hourly ERA5 `925 hPa` wind snapshot, horizontal divergence is computed at every grid cell as:
@@ -34,12 +52,37 @@ Implemented detector math:
   - `dv/dy` is the north-south derivative of the meridional wind
 - The derivatives are evaluated on the native lat-lon ERA5 grid using local grid spacing from `lat_lon_grid_deltas`.
 - In the current implementation, the finite-difference derivatives are evaluated with MetPy's divergence operator, so the result is a full gridded divergence field with units of `s^-1`.
+- A schematic centered-difference example for one grid cell `(i, j)` is:
+  - `du/dx(i, j) ~= (u(i, j+1) - u(i, j-1)) / (x(i, j+1) - x(i, j-1))`
+  - `dv/dy(i, j) ~= (v(i+1, j) - v(i-1, j)) / (y(i+1, j) - y(i-1, j))`
+- MetPy handles the actual grid-metric details and edge treatment internally; the equations above are the reproducible finite-difference idea behind the implementation.
 - A fixed polygon mask is then applied using the original Shinoda-style JPCZ polygon.
+- In practice, "apply the polygon mask" means:
+  - build a boolean array with the same `latitude x longitude` shape as the ERA5 slice
+  - mark a cell `True` when that grid-cell center falls inside the polygon vertices
+  - mark it `False` otherwise
+- So the detector uses only the grid cells whose centers fall inside the polygon when computing the polygon mean.
+- If the polygon vertices are `(lon_1, lat_1), ..., (lon_n, lat_n)` and the grid-cell center is `(lon_j, lat_i)`, then:
+  - `mask(i, j) = 1` if `(lon_j, lat_i)` is inside the polygon
+  - `mask(i, j) = 0` otherwise
+- The current polygon vertices are the first-pass digitization of Shinoda Figure 2:
+  - `(129.5, 41.0)`
+  - `(136.0, 37.4)`
+  - `(134.5, 35.8)`
+  - `(128.8, 38.0)`
 - Inside that polygon, the detector builds an hourly polygon-area-mean divergence series:
   - `D_hourly(t) = area_mean_polygon(div925(t))`
 - The spatial mean is cosine-latitude weighted so that grid cells are area weighted rather than counted equally by row.
+- More explicitly, if `w(i, j) = cos(lat_i)` and `mask(i, j)` is the polygon mask, then:
+  - `D_hourly(t) = sum_ij(mask(i, j) * w(i, j) * div925(i, j, t)) / sum_ij(mask(i, j) * w(i, j))`
 - The event detector then computes the Shinoda-style `12 h` rolling mean:
   - `D_12h(t) = rolling_mean_12h(D_hourly(t))`
+- In the current implementation this is a trailing, end-labeled rolling mean:
+  - `D_12h(t_k) = (1 / 12) * sum_{m=0}^{11} D_hourly(t_{k-m})`
+- Example:
+  - if the hourly polygon-mean series has values at `01:00, 02:00, ..., 12:00 UTC`
+  - then `D_12h(12:00 UTC)` is the mean of those `12` hourly values
+  - this is not a centered window and it is not a forward-looking window
 - Because the detector is based on divergence, more negative `D_12h` values correspond to stronger polygon-mean convergence.
 - The threshold is computed from the full valid `D_12h` series as:
   - `threshold = mean(D_12h) - 2 * std(D_12h)`
@@ -51,6 +94,27 @@ Implemented detector math:
   - `event_peak` = time of the minimum `D_12h` value within that grouped event
   - `event_peak_D` = minimum `D_12h` value within that grouped event
 - The merged NDJF catalog later broadens nearby threshold fragments into larger synoptic episodes, but the core event membership still originates from this polygon-mean divergence-threshold process.
+
+Why the merged NDJF catalog is not just a list of weakening and reforming fragments:
+
+- The raw threshold detector only knows about consecutive below-threshold hours.
+- If one threshold run ends, then a short above-threshold gap occurs, then another threshold run starts, the raw detector would initially create two separate events.
+- `Notebook 06` resolves this by merging adjacent detector events separated by a short threshold-free gap.
+- The current recommended merge gap is `12 h`.
+- Two raw events are merged when:
+  - `gap_hours = (next_event_start - previous_event_end) <= 12`
+- Example:
+  - raw event A ends at `2004-01-21 06:00 UTC`
+  - raw event B starts at `2004-01-21 15:00 UTC`
+  - `gap_hours = 9`
+  - because `9 <= 12`, they are merged into one broader episode
+- For the merged event:
+  - `event_start` becomes the start of the first fragment
+  - `event_end` becomes the end of the last fragment
+  - `event_peak` remains the time of the most negative `D_12h` across the merged fragments
+  - `threshold_hit_hours` stores the sum of threshold-hit hours across fragments
+  - `duration_hours` becomes the total episode span, including the internal gap
+- This means the working NDJF merged catalog is intended to represent broader synoptic episodes rather than every temporary threshold interruption as a new event.
 
 Important distinction:
 
@@ -194,6 +258,12 @@ Calculation:
 - Convert ERA5 geopotential to geopotential height at `850 hPa`.
 - Define:
   - `z850_anomaly = event-time z850 - background climatological z850`
+- The monthly climatology is computed month by month over the event years represented in the merged NDJF catalog.
+- In the current workflow, if the merged working catalog contains event peaks spanning years `Y1 ... Yn`, then:
+  - November climatology is the mean of all November `850 hPa` geopotential-height hourly fields across `Y1 ... Yn`
+  - December climatology is the mean of all December hourly fields across `Y1 ... Yn`
+  - January climatology is the mean of all January hourly fields across `Y1 ... Yn`
+  - February climatology is the mean of all February hourly fields across `Y1 ... Yn`
 - Evaluate the anomaly field at `t-12 h`, `t0`, and `t+12 h`.
 - Save the most negative value in the Hokkaido box across those three times.
 
@@ -480,6 +550,14 @@ Current interpretation guidance:
 - They are not separate physical fields and they are not the clustering algorithm.
 - Their physical meaning depends on the feature loadings on each component.
 - In the current workflow, PCA is used to visualize the same structure already present in the raw scatterplots and clustering table, not to define the clusters.
+- More explicitly, for event `i`:
+  - `PC1_i = a_11 * z_i1 + a_12 * z_i2 + a_13 * z_i3 + a_14 * z_i4`
+  - `PC2_i = a_21 * z_i1 + a_22 * z_i2 + a_23 * z_i3 + a_24 * z_i4`
+  - `PC3_i = a_31 * z_i1 + a_32 * z_i2 + a_33 * z_i3 + a_34 * z_i4`
+- Here:
+  - `z_i1` through `z_i4` are the standardized clustering features for event `i`
+  - the `a_mj` values are the PCA loadings
+- The explained variance ratio for `PC1` is the fraction of total standardized event-to-event variance captured by the `PC1` direction; the same logic applies to `PC2` and `PC3`.
 
 Relation between raw scatterplots and PCA:
 
@@ -510,6 +588,109 @@ For the current validated `k = 3` working solution:
   - stronger synoptic-height depression, stronger frontality, and stronger convergence/circulation signatures
 
 These physical labels are post hoc interpretations of the objective cluster medians and validation tests. They are not used as clustering inputs.
+
+## Composite workflow for Notebook 10
+
+After `Notebook 09` validates `k = 3` as the working subtype framework, `Notebook 10` moves from event-level scalar summaries to full gridded composite maps.
+
+### What is composited
+
+The primary composite notebook uses three gridded physical fields, each composited separately for `Cluster 1`, `Cluster 2`, and `Cluster 3`:
+
+1. `925 hPa` convergence at the event peak time
+2. `850 hPa` geopotential-height anomaly minimum over `t-12`, `t0`, `t+12`
+3. `850 hPa` temperature-gradient magnitude maximum over `t-12`, `t0`, `t+12`
+
+These are intended to be gridded analogs of the scalar subtype-physics variables used in clustering.
+
+### Composite-field formulas
+
+For event `n`:
+
+- peak-time convergence field:
+  - `conv925_n(i, j) = max(-div925_n(i, j, t0), 0) * 1e5`
+- time-window `z850` anomaly field:
+  - `z850_anom_n(i, j, t) = z850_n(i, j, t) - z850_climatology(i, j, month(t))`
+  - primary composite field:
+    - `z850_anom_min_n(i, j) = min_{t in [-12, 0, +12]} z850_anom_n(i, j, t)`
+- time-window temperature-gradient field:
+  - `|grad T850|_n(i, j, t) = sqrt((dT/dx)^2 + (dT/dy)^2) * 1e5`
+  - primary composite field:
+    - `tempgrad_max_n(i, j) = max_{t in [-12, 0, +12]} |grad T850|_n(i, j, t)`
+
+### Pointwise composite mean
+
+For cluster `c` and field `F_n(i, j)`:
+
+- `N_c(i, j) = sum_n 1[finite(F_n(i, j))]`
+- `Sum_c(i, j) = sum_n F_n(i, j) * 1[finite(F_n(i, j))]`
+- `Mean_c(i, j) = Sum_c(i, j) / N_c(i, j)`
+
+where the sums run only over events assigned to cluster `c`.
+
+This is a full-domain pointwise mean at every grid cell, not a box-average-only product.
+
+### Pointwise sample counts and standard deviations
+
+The notebook also saves:
+
+- pointwise sample counts:
+  - `N_c(i, j)`
+- pointwise population-style standard deviations:
+  - `Var_c(i, j) = sum_n(F_n(i, j)^2) / N_c(i, j) - Mean_c(i, j)^2`
+  - `Std_c(i, j) = sqrt(max(Var_c(i, j), 0))`
+
+These fields make it possible to:
+
+- mask low-sample regions
+- assess within-cluster spread
+- diagnose whether a composite feature is spatially consistent or driven by a small subset of events
+
+### Zero and missing-data rule in the composite notebook
+
+The composite notebook uses the following rule consistently:
+
+- include zeros if they are real physical values
+- exclude only missing values from the numerator and denominator
+
+So if a grid cell is valid and the convergence there is exactly `0`, that zero remains in the composite.
+If a grid cell is missing, it does not contribute to `Sum_c(i, j)` or `N_c(i, j)`.
+
+### Box-average outputs saved alongside the full maps
+
+The notebook also computes weighted box averages of the same gridded composite fields over:
+
+- Coastal Japan
+- Pacific east of Japan
+- Hokkaido
+- Sea of Japan
+- Hokkaido front
+- Pacific front
+
+For one composite field `F(i, j)` and one box:
+
+- `box_mean(F) = sum_ij(F(i, j) * cos(lat_i) * 1[valid]) / sum_ij(cos(lat_i) * 1[valid])`
+
+These are saved both:
+
+- as event-level box means before cluster averaging
+- and as box means of the final cluster composite maps
+
+This allows direct comparison between:
+
+- the full gridded composites
+- the event-level box statistics
+- the original scalar characterization logic from the clustering workflow
+
+### Optional difference products
+
+The notebook also saves difference maps such as:
+
+- `Cluster 3 - Cluster 2`
+- `Cluster 3 - Cluster 1`
+- `Cluster 2 - Cluster 1`
+
+These are not a new clustering step. They are simply pairwise differences between already-computed cluster-mean fields.
 
 ## How success should be judged
 
