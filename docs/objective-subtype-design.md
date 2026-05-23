@@ -628,6 +628,7 @@ After `Notebook 09` validates `k = 3` as the working subtype framework, `Noteboo
 
 - The composite maps are not composites of the cluster variables themselves.
 - The composite maps are composites of the full gridded physical fields used to calculate the cluster-defining event summaries.
+- For the first primary composite field, the notebook now uses raw signed `del dot U = du/dx + dv/dy` so convergence and divergence remain on one continuum and can cancel in the mean.
 - The primary composite stage uses only the validated `k = 3` framework:
   - `Cluster 1`
   - `Cluster 2`
@@ -643,7 +644,7 @@ There are nine primary composite maps:
 
 The three physical fields are:
 
-1. `925 hPa` convergence at the event peak time
+1. `925 hPa` signed divergence at the event peak time
 2. `850 hPa` geopotential-height anomaly minimum over `t-12`, `t0`, `t+12`
 3. `850 hPa` temperature-gradient magnitude maximum over `t-12`, `t0`, `t+12`
 
@@ -653,8 +654,8 @@ These are intended to be the full-domain gridded analogs of the physical ingredi
 
 For event `n`:
 
-- peak-time convergence field:
-  - `conv925_n(i, j) = max(-div925_n(i, j, t0), 0) * 1e5`
+- peak-time signed-divergence field:
+  - `div925_n(i, j) = (du/dx + dv/dy)_n(i, j, t0) * 1e5`
 - time-window `z850` anomaly field:
   - `z850_anom_n(i, j, t) = z850_n(i, j, t) - z850_climatology(i, j, month(t))`
   - primary composite field:
@@ -714,8 +715,10 @@ The composite notebook uses the following rule consistently:
 - exclude only missing values from the numerator and denominator
 - apply that same rule across every process in the composite workflow
 
-So if a grid cell is valid and the convergence there is exactly `0`, that zero remains in the composite.
+So if a grid cell is valid and the signed divergence there is exactly `0`, that zero remains in the composite.
 If a grid cell is missing, it does not contribute to `Sum_c(i, j)` or `N_c(i, j)`.
+
+Because the first primary composite field now uses raw signed `del dot U`, convergence and divergence can cancel when the field is averaged over points or over events, which is the intended behavior for the composite maps.
 
 This same rule should be used consistently for:
 
