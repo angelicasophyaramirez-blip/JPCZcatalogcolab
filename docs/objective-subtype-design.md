@@ -150,9 +150,9 @@ Why the merged NDJF catalog is not just a list of weakening and reforming fragme
 Important distinction:
 
 - The detection metric `D` is a polygon-mean divergence series, not a convergence-magnitude field.
-- The subtype-characterization convergence fields used later start from the same divergence calculation, but then convert it into positive-only convergence magnitude for spatial interpretation:
-  - `conv925 = max(-div925, 0)`
-- So the detector uses negative divergence directly, while the subtype characterization uses a derived positive-only convergence field.
+- The subtype-characterization layer now uses the same signed divergence continuum:
+  - `div925 = du/dx + dv/dy`
+- So the detector and the subtype characterization both work from signed `del dot U`; convergence and divergence are allowed to cancel inside a predefined region when the regional mean is computed.
 
 ### Characterization layer
 
@@ -192,25 +192,27 @@ Avoid overly cryptic shorthand such as `C_core`, `Z850'`, or `V_soj` in saved ta
 
 The first clustering experiment should use the following event-level features.
 
-### 1. JPCZ polygon convergence
+### 1. JPCZ polygon signed divergence
 
 Column names:
 
-- `jpcz_polygon_mean_convergence_peak_925`
-- `jpcz_polygon_max_convergence_peak_925`
+- `jpcz_polygon_mean_divergence_peak_925`
+- `jpcz_polygon_min_divergence_peak_925`
 
 Meaning:
 
-- Convergence computed from `del dot u` at `925 hPa` within the original JPCZ polygon at the event peak time.
+- Signed divergence computed from `del dot u` at `925 hPa` within the original JPCZ polygon at the event peak time.
 
 Calculation:
 
 - Compute `925 hPa` divergence from hourly ERA5 `u` and `v`.
-- Multiply by `-1` so positive values represent convergence magnitude.
-- Clip positive-divergence values below `0` so the field becomes:
-  - `conv925 = max(-(du/dx + dv/dy), 0)`
-- Summarize the convergence field only within the original JPCZ polygon.
+- Keep the signed field:
+  - `div925 = du/dx + dv/dy`
+- Summarize the signed-divergence field only within the original JPCZ polygon.
 - Use cosine-latitude area weighting for means.
+- Save:
+  - `jpcz_polygon_mean_divergence_peak_925 = mean_polygon(div925)`
+  - `jpcz_polygon_min_divergence_peak_925 = min_polygon(div925)`
 
 Units:
 
@@ -219,60 +221,59 @@ Units:
 
 Purpose:
 
-- Quantifies the strength of convergence in the canonical JPCZ detection region.
+- Quantifies the signed divergence in the canonical JPCZ detection region. More negative values mean stronger polygon-mean convergence; more positive values mean polygon-mean divergence.
 
 Current zero and missing-data handling:
 
-- Real zeros produced by the positive-only convergence definition are included in spatial means.
-- Missing values outside the polygon or outside a selected box are masked before the weighted average is taken.
-- In the current implementation, masked missing values are filled with `0` after masking and multiplied by the region weights, so only in-region cells contribute to the weighted sum.
-- This rule is applied consistently across polygon and box means.
+- Real zeros in `div925` are included in spatial means.
+- Missing values inside a selected region are excluded from both the weighted numerator and weighted denominator.
+- Region masks are still applied first so only in-region cells can contribute.
+- This rule is applied consistently across polygon and box means and across all later composite averaging.
 - A later sensitivity experiment should compare this current implementation against an alternate treatment to quantify whether zero-handling materially changes the subtype results.
 
-### 2. Coastal-Japan convergence
+### 2. Coastal-Japan signed divergence
 
 Column names:
 
-- `coastal_japan_mean_convergence_peak_925`
-- `coastal_japan_max_convergence_peak_925`
-- `coastal_to_jpcz_convergence_ratio`
+- `coastal_japan_mean_divergence_peak_925`
+- `coastal_japan_min_divergence_peak_925`
+- `coastal_to_jpcz_mean_divergence_ratio`
 
 Meaning:
 
-- Convergence computed from `del dot u` at `925 hPa` in a new coastal-Japan characterization region.
+- Signed divergence computed from `del dot u` at `925 hPa` in a new coastal-Japan characterization region.
 
 Calculation:
 
-- Compute the same convergence field used above.
+- Compute the same signed-divergence field used above.
 - Summarize it within a coastal-Japan box or polygon designed only for characterization.
 - Compute the ratio:
-  - `coastal_to_jpcz_convergence_ratio = coastal_japan_mean_convergence_peak_925 / jpcz_polygon_mean_convergence_peak_925`
-  - or use the max-based ratio if later testing shows it is more stable.
+  - `coastal_to_jpcz_mean_divergence_ratio = coastal_japan_mean_divergence_peak_925 / jpcz_polygon_mean_divergence_peak_925`
 
 Units:
 
-- convergence fields in `s^-1`
+- signed-divergence fields in `s^-1`
 - ratio is unitless
 
 Purpose:
 
-- Measures whether the strongest convergence is polygon-centered or shifted toward coastal Japan.
+- Measures how the coastal signed-divergence mean compares with the polygon mean. When both means are negative, values greater than `1` indicate the coastal box is more convergent than the polygon mean, values between `0` and `1` indicate it is less convergent, and negative values indicate opposite-signed regional means.
 
-### 3. Pacific-side convergence
+### 3. Pacific-side signed divergence
 
 Column names:
 
-- `pacific_east_of_japan_mean_convergence_peak_925`
-- `pacific_east_of_japan_max_convergence_peak_925`
-- `pacific_to_jpcz_convergence_ratio`
+- `pacific_east_of_japan_mean_divergence_peak_925`
+- `pacific_east_of_japan_min_divergence_peak_925`
+- `pacific_to_jpcz_mean_divergence_ratio`
 
 Meaning:
 
-- Convergence computed from `del dot u` at `925 hPa` in a Pacific box east of Japan.
+- Signed divergence computed from `del dot u` at `925 hPa` in a Pacific box east of Japan.
 
 Purpose:
 
-- Measures whether the event is coupled to stronger convergence east of Japan rather than being confined to the Sea of Japan side.
+- Measures whether the event is coupled to stronger Pacific-side convergence or divergence relative to the polygon mean.
 
 ### 4. Hokkaido passing-low metric
 
@@ -358,7 +359,7 @@ Meaning:
 
 Purpose:
 
-- Quantifies circulation-centered events that may not be explained only by polygon or coastal convergence strength.
+- Quantifies circulation-centered events that may not be explained only by polygon or coastal signed-divergence structure.
 
 ## Time-window logic
 
@@ -380,14 +381,14 @@ The first forcing or modifier clustering should use a small, interpretable featu
 
 Recommended first-pass feature set:
 
-- `coastal_to_jpcz_convergence_ratio`
+- `coastal_to_jpcz_mean_divergence_ratio`
 - `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
 - `front_box_max_temp_gradient_850_tminus12_to_tplus12`
 - optionally `sea_of_japan_mean_vorticity_peak_925`
 
 This first experiment is designed to test:
 
-- polygon-centered versus coastal-enhanced convergence
+- polygon-centered versus coastal-enhanced signed divergence
 - lower versus higher synoptic forcing
 - frontal influence versus non-frontal influence
 - optional circulation-centered structure
@@ -396,24 +397,24 @@ This first experiment is designed to test:
 
 Before formal clustering, make event-level scatterplots such as:
 
-1. `coastal_to_jpcz_convergence_ratio` versus `jpcz_polygon_max_convergence_peak_925`
-2. `coastal_to_jpcz_convergence_ratio` versus `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
-3. `pacific_to_jpcz_convergence_ratio` versus `front_box_max_temp_gradient_850_tminus12_to_tplus12`
+1. `coastal_to_jpcz_mean_divergence_ratio` versus `jpcz_polygon_min_divergence_peak_925`
+2. `coastal_to_jpcz_mean_divergence_ratio` versus `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
+3. `pacific_to_jpcz_mean_divergence_ratio` versus `front_box_max_temp_gradient_850_tminus12_to_tplus12`
 4. `sea_of_japan_mean_vorticity_peak_925` versus `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
 
 These plots should be inspected before clustering to see whether any natural separation exists.
 
 The current first-pass scatterplot set uses the following pairings:
 
-1. `coastal_to_jpcz_mean_convergence_ratio` versus `jpcz_polygon_max_convergence_peak_925`
-2. `coastal_to_jpcz_mean_convergence_ratio` versus `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
-3. `pacific_to_jpcz_mean_convergence_ratio` versus `front_box_max_temp_gradient_850_tminus12_to_tplus12`
+1. `coastal_to_jpcz_mean_divergence_ratio` versus `jpcz_polygon_min_divergence_peak_925`
+2. `coastal_to_jpcz_mean_divergence_ratio` versus `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
+3. `pacific_to_jpcz_mean_divergence_ratio` versus `front_box_max_temp_gradient_850_tminus12_to_tplus12`
 4. `sea_of_japan_mean_vorticity_peak_925` versus `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
 
 These are not the clustering themselves. They are raw event-level views of the original physical feature space:
 
-- convergence location versus polygon-core strength
-- convergence location versus synoptic-height forcing
+- coastal-versus-polygon signed-divergence contrast versus polygon-core minimum divergence
+- coastal-versus-polygon signed-divergence contrast versus synoptic-height forcing
 - Pacific coupling versus frontality
 - Sea of Japan circulation versus synoptic-height forcing
 
@@ -440,7 +441,7 @@ The current first-pass objective subtype workflow in `Notebook 08` uses one even
 
 For the current first-pass subtype experiment, each event is represented by four clustering features:
 
-- `coastal_to_jpcz_mean_convergence_ratio`
+- `coastal_to_jpcz_mean_divergence_ratio`
 - `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
 - `front_box_max_temp_gradient_850_tminus12_to_tplus12`
 - `sea_of_japan_mean_vorticity_peak_925`
@@ -451,8 +452,8 @@ For event `i`, the feature vector is:
 
 Physical mapping of the four clustering axes:
 
-- `coastal_to_jpcz_mean_convergence_ratio`
-  - convergence-location axis
+- `coastal_to_jpcz_mean_divergence_ratio`
+  - coastal-versus-polygon signed-divergence axis
   - Coastal Japan box versus JPCZ polygon
 - `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
   - synoptic-height-forcing axis
@@ -465,6 +466,7 @@ Physical mapping of the four clustering axes:
   - Sea of Japan box
 
 These variables were selected because they represent different physical mechanisms and are less redundant than using many closely related convergence-only metrics at once.
+These variables were selected because they represent different physical mechanisms and keep the low-level regional metric on the signed `del dot U` continuum rather than clipping divergence away before averaging.
 
 ### Step 2. Standardize each feature with a z score
 
@@ -808,9 +810,9 @@ A later magnitude-focused experiment can use:
 
 - `event_peak_D_1e5_s-1`
 - duration
-- `jpcz_polygon_max_convergence_peak_925`
-- `coastal_japan_max_convergence_peak_925`
-- integrated convergence metrics if added
+- `jpcz_polygon_min_divergence_peak_925`
+- `coastal_japan_min_divergence_peak_925`
+- integrated signed-divergence metrics if added
 
 ## Not first priority
 

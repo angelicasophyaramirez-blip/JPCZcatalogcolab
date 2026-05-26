@@ -49,114 +49,114 @@ class FeatureDefinition:
 
 FEATURE_DEFINITIONS: tuple[FeatureDefinition, ...] = (
     FeatureDefinition(
-        column_name="jpcz_polygon_mean_convergence_peak_925",
+        column_name="jpcz_polygon_mean_divergence_peak_925",
         units="1e-5 s^-1",
-        meaning="Area-weighted mean convergence magnitude in the original JPCZ polygon at peak time.",
-        formula="mean_polygon(max(-div925, 0))",
-        calculation="Compute 925 hPa divergence from ERA5 u and v, multiply by -1, clip negative values to 0, then area-average inside the JPCZ polygon.",
-        interpretation="Larger values mean stronger canonical JPCZ-core convergence within the original detection polygon.",
+        meaning="Area-weighted mean signed divergence in the original JPCZ polygon at peak time.",
+        formula="mean_polygon(div925)",
+        calculation="Compute 925 hPa divergence from ERA5 u and v and area-average the signed del dot U field inside the JPCZ polygon.",
+        interpretation="More negative values mean stronger polygon-mean convergence; more positive values mean polygon-mean divergence.",
         region="Original JPCZ polygon",
         time_window="event peak only",
-        purpose="Canonical convergence strength in the Shinoda detection region.",
+        purpose="Canonical signed divergence metric in the Shinoda detection region.",
     ),
     FeatureDefinition(
-        column_name="jpcz_polygon_max_convergence_peak_925",
+        column_name="jpcz_polygon_min_divergence_peak_925",
         units="1e-5 s^-1",
-        meaning="Maximum convergence magnitude in the original JPCZ polygon at peak time.",
-        formula="max_polygon(max(-div925, 0))",
-        calculation="Maximum of the positive-only convergence field inside the JPCZ polygon.",
-        interpretation="Larger values mean a stronger local convergence peak within the original JPCZ polygon.",
+        meaning="Most negative signed divergence value in the original JPCZ polygon at peak time.",
+        formula="min_polygon(div925)",
+        calculation="Minimum of the signed divergence field inside the JPCZ polygon.",
+        interpretation="More negative values mean a stronger local convergence center within the original JPCZ polygon.",
         region="Original JPCZ polygon",
         time_window="event peak only",
-        purpose="Peak local convergence in the Shinoda detection region.",
+        purpose="Captures the strongest local convergence center in the Shinoda detection region without clipping divergence.",
     ),
     FeatureDefinition(
-        column_name="coastal_japan_mean_convergence_peak_925",
+        column_name="coastal_japan_mean_divergence_peak_925",
         units="1e-5 s^-1",
-        meaning="Area-weighted mean convergence magnitude in the coastal-Japan characterization box at peak time.",
-        formula="mean_coast(max(-div925, 0))",
-        calculation="Same convergence field as above, summarized in the coastal-Japan box.",
-        interpretation="Larger values mean stronger coastal-Japan convergence at the event peak.",
+        meaning="Area-weighted mean signed divergence in the coastal-Japan characterization box at peak time.",
+        formula="mean_coast(div925)",
+        calculation="Same signed divergence field as above, summarized in the coastal-Japan box.",
+        interpretation="More negative values mean stronger coastal-Japan convergence; more positive values mean coastal-Japan divergence.",
         region="Coastal Japan box",
         time_window="event peak only",
-        purpose="Measures whether convergence is enhanced along the west coast of Japan.",
+        purpose="Measures whether the event is more convergent or divergent along the west coast of Japan.",
     ),
     FeatureDefinition(
-        column_name="coastal_japan_max_convergence_peak_925",
+        column_name="coastal_japan_min_divergence_peak_925",
         units="1e-5 s^-1",
-        meaning="Maximum convergence magnitude in the coastal-Japan characterization box at peak time.",
-        formula="max_coast(max(-div925, 0))",
-        calculation="Maximum of the positive-only convergence field in the coastal-Japan box.",
-        interpretation="Larger values mean a stronger local coastal convergence core.",
+        meaning="Most negative signed divergence value in the coastal-Japan characterization box at peak time.",
+        formula="min_coast(div925)",
+        calculation="Minimum of the signed divergence field in the coastal-Japan box.",
+        interpretation="More negative values mean a stronger local coastal convergence center.",
         region="Coastal Japan box",
         time_window="event peak only",
-        purpose="Captures the strongest coastal convergence core.",
+        purpose="Captures the strongest coastal convergence center without clipping divergence elsewhere in the box.",
     ),
     FeatureDefinition(
-        column_name="coastal_to_jpcz_mean_convergence_ratio",
+        column_name="coastal_to_jpcz_mean_divergence_ratio",
         units="unitless",
-        meaning="Ratio of coastal-Japan mean convergence to JPCZ-polygon mean convergence.",
-        formula="coastal_japan_mean_convergence_peak_925 / jpcz_polygon_mean_convergence_peak_925",
-        calculation="coastal_japan_mean_convergence_peak_925 / jpcz_polygon_mean_convergence_peak_925",
-        interpretation="Values < 1 mean the coastal-Japan mean convergence is weaker than the JPCZ-polygon mean; values near 1 mean they are similar; values > 1 mean the event is more coastal-enhanced than polygon-centered.",
+        meaning="Ratio of coastal-Japan mean signed divergence to JPCZ-polygon mean signed divergence.",
+        formula="coastal_japan_mean_divergence_peak_925 / jpcz_polygon_mean_divergence_peak_925",
+        calculation="coastal_japan_mean_divergence_peak_925 / jpcz_polygon_mean_divergence_peak_925",
+        interpretation="When both regional means are negative, values > 1 mean the coastal box is more convergent than the polygon mean, values between 0 and 1 mean it is less convergent, and negative values indicate opposite-signed regional means.",
         region="Coastal Japan vs JPCZ polygon",
         time_window="event peak only",
-        purpose="Measures how coastal-enhanced the event is relative to the canonical JPCZ core.",
+        purpose="Measures how the coastal signed-divergence mean compares with the canonical JPCZ signed-divergence mean.",
     ),
     FeatureDefinition(
-        column_name="coastal_to_jpcz_max_convergence_ratio",
+        column_name="coastal_to_jpcz_min_divergence_ratio",
         units="unitless",
-        meaning="Ratio of the coastal-Japan maximum convergence to the JPCZ-polygon maximum convergence.",
-        formula="coastal_japan_max_convergence_peak_925 / jpcz_polygon_max_convergence_peak_925",
-        calculation="coastal_japan_max_convergence_peak_925 / jpcz_polygon_max_convergence_peak_925",
-        interpretation="Values < 1 mean the strongest local peak remains inside the JPCZ polygon; values > 1 mean the strongest local peak is more coastal-enhanced.",
+        meaning="Ratio of the coastal-Japan minimum signed divergence to the JPCZ-polygon minimum signed divergence.",
+        formula="coastal_japan_min_divergence_peak_925 / jpcz_polygon_min_divergence_peak_925",
+        calculation="coastal_japan_min_divergence_peak_925 / jpcz_polygon_min_divergence_peak_925",
+        interpretation="When both extrema are negative, values > 1 mean the strongest local convergence is more coastal-enhanced than polygon-centered.",
         region="Coastal Japan vs JPCZ polygon",
         time_window="event peak only",
-        purpose="Alternative coastal-enhancement metric based on local maxima instead of regional means.",
+        purpose="Alternative coastal-enhancement metric based on local signed-divergence minima instead of regional means.",
     ),
     FeatureDefinition(
-        column_name="pacific_east_of_japan_mean_convergence_peak_925",
+        column_name="pacific_east_of_japan_mean_divergence_peak_925",
         units="1e-5 s^-1",
-        meaning="Area-weighted mean convergence magnitude east of Japan at peak time.",
-        formula="mean_pacific(max(-div925, 0))",
-        calculation="Same convergence field as above, summarized in the Pacific characterization box.",
-        interpretation="Larger values mean stronger Pacific-side convergence at the event peak.",
+        meaning="Area-weighted mean signed divergence east of Japan at peak time.",
+        formula="mean_pacific(div925)",
+        calculation="Same signed divergence field as above, summarized in the Pacific characterization box.",
+        interpretation="More negative values mean stronger Pacific-side convergence; more positive values mean Pacific-side divergence.",
         region="Pacific east of Japan box",
         time_window="event peak only",
-        purpose="Measures whether the event is coupled to stronger Pacific-side convergence.",
+        purpose="Measures whether the event is coupled to stronger Pacific-side signed convergence/divergence anomalies.",
     ),
     FeatureDefinition(
-        column_name="pacific_east_of_japan_max_convergence_peak_925",
+        column_name="pacific_east_of_japan_min_divergence_peak_925",
         units="1e-5 s^-1",
-        meaning="Maximum convergence magnitude east of Japan at peak time.",
-        formula="max_pacific(max(-div925, 0))",
-        calculation="Maximum of the positive-only convergence field in the Pacific characterization box.",
-        interpretation="Larger values mean a stronger local Pacific-side convergence core.",
+        meaning="Most negative signed divergence value east of Japan at peak time.",
+        formula="min_pacific(div925)",
+        calculation="Minimum of the signed divergence field in the Pacific characterization box.",
+        interpretation="More negative values mean a stronger local Pacific-side convergence center.",
         region="Pacific east of Japan box",
         time_window="event peak only",
-        purpose="Captures the strongest Pacific-side convergence core.",
+        purpose="Captures the strongest Pacific-side convergence center without clipping divergence elsewhere in the box.",
     ),
     FeatureDefinition(
-        column_name="pacific_to_jpcz_mean_convergence_ratio",
+        column_name="pacific_to_jpcz_mean_divergence_ratio",
         units="unitless",
-        meaning="Ratio of Pacific-box mean convergence to JPCZ-polygon mean convergence.",
-        formula="pacific_east_of_japan_mean_convergence_peak_925 / jpcz_polygon_mean_convergence_peak_925",
-        calculation="pacific_east_of_japan_mean_convergence_peak_925 / jpcz_polygon_mean_convergence_peak_925",
-        interpretation="Values < 1 mean the Pacific-side mean convergence is weaker than the JPCZ-polygon mean; values > 1 mean the event is more Pacific-coupled.",
+        meaning="Ratio of Pacific-box mean signed divergence to JPCZ-polygon mean signed divergence.",
+        formula="pacific_east_of_japan_mean_divergence_peak_925 / jpcz_polygon_mean_divergence_peak_925",
+        calculation="pacific_east_of_japan_mean_divergence_peak_925 / jpcz_polygon_mean_divergence_peak_925",
+        interpretation="When both regional means are negative, values > 1 mean the Pacific box is more convergent than the polygon mean; negative values indicate opposite-signed regional means.",
         region="Pacific east of Japan vs JPCZ polygon",
         time_window="event peak only",
-        purpose="Measures how strongly the event is coupled to Pacific-side convergence.",
+        purpose="Measures how strongly the event is coupled to Pacific-side signed convergence/divergence relative to the polygon mean.",
     ),
     FeatureDefinition(
-        column_name="pacific_to_jpcz_max_convergence_ratio",
+        column_name="pacific_to_jpcz_min_divergence_ratio",
         units="unitless",
-        meaning="Ratio of the Pacific-box maximum convergence to the JPCZ-polygon maximum convergence.",
-        formula="pacific_east_of_japan_max_convergence_peak_925 / jpcz_polygon_max_convergence_peak_925",
-        calculation="pacific_east_of_japan_max_convergence_peak_925 / jpcz_polygon_max_convergence_peak_925",
-        interpretation="Values < 1 mean the strongest local peak remains on the Sea of Japan side; values > 1 mean a stronger Pacific-side local peak.",
+        meaning="Ratio of the Pacific-box minimum signed divergence to the JPCZ-polygon minimum signed divergence.",
+        formula="pacific_east_of_japan_min_divergence_peak_925 / jpcz_polygon_min_divergence_peak_925",
+        calculation="pacific_east_of_japan_min_divergence_peak_925 / jpcz_polygon_min_divergence_peak_925",
+        interpretation="When both extrema are negative, values > 1 mean the strongest local convergence is more Pacific-enhanced than polygon-centered.",
         region="Pacific east of Japan vs JPCZ polygon",
         time_window="event peak only",
-        purpose="Alternative Pacific-coupling metric based on local maxima instead of regional means.",
+        purpose="Alternative Pacific-coupling metric based on local signed-divergence minima instead of regional means.",
     ),
     FeatureDefinition(
         column_name="sea_of_japan_mean_vorticity_peak_925",
@@ -344,12 +344,14 @@ def build_objective_subtype_feature_table(
                 polygon_vertices,
             )
 
-        divergence_field = compute_divergence_field(
+        divergence_field = (
+            compute_divergence_field(
             peak_snapshot_925,
             dx=geometry_925.dx,
             dy=geometry_925.dy,
-        )
-        convergence_field = ((-divergence_field).clip(min=0.0) * 1e5).rename("convergence_925_display")
+            )
+            * 1e5
+        ).rename("divergence_925_display")
         vorticity_field = (
             compute_relative_vorticity_field(
                 peak_snapshot_925,
@@ -359,12 +361,12 @@ def build_objective_subtype_feature_table(
             * 1e5
         ).rename("relative_vorticity_925_display")
 
-        jpcz_mean = _weighted_mean_masked(convergence_field, geometry_925.polygon_mask)
-        jpcz_max = _masked_max(convergence_field, geometry_925.polygon_mask)
-        coastal_mean = _box_weighted_mean(convergence_field, coastal_box)
-        coastal_max = _box_max(convergence_field, coastal_box)
-        pacific_mean = _box_weighted_mean(convergence_field, pacific_box)
-        pacific_max = _box_max(convergence_field, pacific_box)
+        jpcz_mean = _weighted_mean_masked(divergence_field, geometry_925.polygon_mask)
+        jpcz_min = _masked_min(divergence_field, geometry_925.polygon_mask)
+        coastal_mean = _box_weighted_mean(divergence_field, coastal_box)
+        coastal_min = _box_min(divergence_field, coastal_box)
+        pacific_mean = _box_weighted_mean(divergence_field, pacific_box)
+        pacific_min = _box_min(divergence_field, pacific_box)
         soj_vort_mean = _box_weighted_mean(vorticity_field, sea_of_japan_box)
         soj_vort_max = _box_max(vorticity_field, sea_of_japan_box)
 
@@ -408,16 +410,16 @@ def build_objective_subtype_feature_table(
         record = row.to_dict()
         record.update(
             {
-                "jpcz_polygon_mean_convergence_peak_925": jpcz_mean,
-                "jpcz_polygon_max_convergence_peak_925": jpcz_max,
-                "coastal_japan_mean_convergence_peak_925": coastal_mean,
-                "coastal_japan_max_convergence_peak_925": coastal_max,
-                "coastal_to_jpcz_mean_convergence_ratio": _safe_ratio(coastal_mean, jpcz_mean),
-                "coastal_to_jpcz_max_convergence_ratio": _safe_ratio(coastal_max, jpcz_max),
-                "pacific_east_of_japan_mean_convergence_peak_925": pacific_mean,
-                "pacific_east_of_japan_max_convergence_peak_925": pacific_max,
-                "pacific_to_jpcz_mean_convergence_ratio": _safe_ratio(pacific_mean, jpcz_mean),
-                "pacific_to_jpcz_max_convergence_ratio": _safe_ratio(pacific_max, jpcz_max),
+                "jpcz_polygon_mean_divergence_peak_925": jpcz_mean,
+                "jpcz_polygon_min_divergence_peak_925": jpcz_min,
+                "coastal_japan_mean_divergence_peak_925": coastal_mean,
+                "coastal_japan_min_divergence_peak_925": coastal_min,
+                "coastal_to_jpcz_mean_divergence_ratio": _safe_ratio(coastal_mean, jpcz_mean),
+                "coastal_to_jpcz_min_divergence_ratio": _safe_ratio(coastal_min, jpcz_min),
+                "pacific_east_of_japan_mean_divergence_peak_925": pacific_mean,
+                "pacific_east_of_japan_min_divergence_peak_925": pacific_min,
+                "pacific_to_jpcz_mean_divergence_ratio": _safe_ratio(pacific_mean, jpcz_mean),
+                "pacific_to_jpcz_min_divergence_ratio": _safe_ratio(pacific_min, jpcz_min),
                 "sea_of_japan_mean_vorticity_peak_925": soj_vort_mean,
                 "sea_of_japan_max_vorticity_peak_925": soj_vort_max,
                 "hokkaido_min_z850_anomaly_tminus12_to_tplus12": float(np.nanmin(hokkaido_min_anoms)),
@@ -814,10 +816,11 @@ def _weighted_mean_masked(field: xr.DataArray, mask: xr.DataArray) -> float:
         masked.longitude,
         mask=mask,
     )
-    total_weight = float(weights.sum().values)
+    valid_weights = weights.where(masked.notnull(), 0.0)
+    total_weight = float(valid_weights.sum().values)
     if total_weight == 0.0:
         return float("nan")
-    return float(((masked.fillna(0.0) * weights).sum() / total_weight).values)
+    return float(((masked.fillna(0.0) * valid_weights).sum() / total_weight).values)
 
 
 def _box_weighted_mean(field: xr.DataArray, box: BoundingBox) -> float:
@@ -826,15 +829,21 @@ def _box_weighted_mean(field: xr.DataArray, box: BoundingBox) -> float:
         latitude=slice(box.lat_max, box.lat_min),
     )
     weights = build_coslat_weights(boxed.latitude, boxed.longitude)
-    total_weight = float(weights.sum().values)
+    valid_weights = weights.where(boxed.notnull(), 0.0)
+    total_weight = float(valid_weights.sum().values)
     if total_weight == 0.0:
         return float("nan")
-    return float(((boxed.fillna(0.0) * weights).sum() / total_weight).values)
+    return float(((boxed.fillna(0.0) * valid_weights).sum() / total_weight).values)
 
 
 def _masked_max(field: xr.DataArray, mask: xr.DataArray) -> float:
     masked = field.where(mask)
     return float(masked.max(skipna=True).values)
+
+
+def _masked_min(field: xr.DataArray, mask: xr.DataArray) -> float:
+    masked = field.where(mask)
+    return float(masked.min(skipna=True).values)
 
 
 def _box_max(field: xr.DataArray, box: BoundingBox) -> float:
