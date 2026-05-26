@@ -679,6 +679,22 @@ Additional interpretation-only composite fields in `Notebook 10`:
 - peak-time `300 hPa` geopotential-height anomaly field:
   - `z300_anom_n(i, j) = z300_n(i, j, t0) - z300_climatology(i, j, month(t0))`
   - this is used to visualize the mean upper-level wave pattern and jet-relative trough-ridge placement
+- peak-time `300 hPa` total-divergence field:
+  - `div300_n(i, j) = (du300/dx + dv300/dy)_n(i, j, t0) * 1e5`
+  - negative values indicate upper-level convergence and positive values indicate upper-level divergence
+- peak-time `300 hPa` frontogenesis field:
+  - `F300_n(i, j) = frontogenesis(T300_n, u300_n, v300_n)`
+  - in Petterssen form this is the horizontal frontogenesis tendency:
+    - `F = 0.5 * |grad T| * [D * cos(2 beta) - div]`
+  - here `D` is total horizontal deformation magnitude, `beta` is the angle between the axis of dilatation and the isotherms, and `div = del dot V`
+  - the notebook uses the MetPy implementation of this frontogenesis operator on the full `300 hPa` temperature and wind field
+- peak-time geostrophic and ageostrophic `300 hPa` wind fields:
+  - `u_g = -(g / f) * dZ300/dy`
+  - `v_g =  (g / f) * dZ300/dx`
+  - `u_ag = u300 - u_g`
+  - `v_ag = v300 - v_g`
+  - `div_ag300_n(i, j) = (du_ag/dx + dv_ag/dy)_n(i, j, t0) * 1e5`
+  - these are used to diagnose jet-streak entrance/exit-region forcing in the same fixed Earth-relative coordinate system as the other composite fields
 
 ### Full-domain requirement
 
@@ -686,6 +702,19 @@ Additional interpretation-only composite fields in `Notebook 10`:
 - They are not restricted to the characterization boxes.
 - They are not reduced to pre-aggregated scalar summaries before compositing.
 - The characterization boxes are retained only for later comparison diagnostics.
+
+This is an Eulerian composite framework:
+
+- the latitude-longitude grid is kept fixed in Earth coordinates
+- each event field is evaluated everywhere on that fixed grid
+- then the cluster composite is formed as the pointwise mean at each grid cell
+
+So the upper-level `300 hPa` diagnostics are handled the same way as the lower-level fields:
+
+- compute the full gridded field everywhere in the domain for each event
+- then average those full gridded fields by cluster without recentering them on the jet core
+
+A jet-relative composite would be a different method because it would first align each event by its own jet-streak core or entrance/exit reference point before averaging. That alignment step is intentionally not used in the current Notebook 10 workflow.
 
 ### Pointwise composite mean
 
@@ -797,6 +826,18 @@ Their role in `Notebook 10` is:
 - `z300` anomaly:
   - diagnose the mean upper-level trough-ridge pattern
   - compare whether the clusters differ in large-scale wave geometry, not just low-level structure
+- `div300`:
+  - identify mean upper-level divergence and convergence regions
+  - compare whether upper-level ascent-supporting divergence is geographically shifted between clusters
+- `frontogenesis300`:
+  - diagnose upper-level baroclinic forcing within and around the jet
+  - compare whether one subgroup has stronger jet-level frontogenesis than another
+- `div_ag300`:
+  - isolate the divergent part of the ageostrophic circulation
+  - compare jet entrance/exit-region forcing signals between the cluster composites
+- `uag300` and `vag300` vectors:
+  - visualize the mean ageostrophic circulation relative to the mean jet-speed field
+  - provide a map-based entrance/exit-region diagnostic without leaving the fixed geographic composite framework
 
 ## How success should be judged
 
