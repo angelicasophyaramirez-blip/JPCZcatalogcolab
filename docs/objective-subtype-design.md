@@ -667,6 +667,19 @@ For event `n`:
   - primary composite field:
     - `tempgrad_max_n(i, j) = max_{t in [-12, 0, +12]} |grad T850|_n(i, j, t)`
 
+Additional interpretation-only composite fields in `Notebook 10`:
+
+- peak-time `850 hPa` vertical moisture-flux proxy:
+  - `vmf850_n(i, j) = -1e3 * q850_n(i, j, t0) * omega850_n(i, j, t0)`
+  - here `q850` is specific humidity and `omega850` is ERA5 pressure vertical velocity
+  - positive values indicate a stronger moist-ascent proxy because ERA5 ascent has `omega < 0`
+- peak-time `300 hPa` wind-speed isotach field:
+  - `|V300|_n(i, j) = sqrt(u300_n(i, j, t0)^2 + v300_n(i, j, t0)^2)`
+  - this is used to visualize the mean jet core and jet placement
+- peak-time `300 hPa` geopotential-height anomaly field:
+  - `z300_anom_n(i, j) = z300_n(i, j, t0) - z300_climatology(i, j, month(t0))`
+  - this is used to visualize the mean upper-level wave pattern and jet-relative trough-ridge placement
+
 ### Full-domain requirement
 
 - These gridded fields are computed at every grid point across the full objective-subtype study domain.
@@ -769,6 +782,22 @@ These are not a new clustering step. They are simply pairwise differences betwee
 
 The same notebook may also save pointwise standard-deviation fields so the spread across events can be assessed directly alongside the mean composites.
 
+### `300 hPa` interpretation role
+
+The added `300 hPa` fields are interpretation diagnostics only.
+
+They are not used to define the clusters in `Notebook 08` and they are not used to validate the clustering in `Notebook 09`.
+
+Their role in `Notebook 10` is:
+
+- `|V300|`:
+  - locate the mean jet core
+  - compare jet placement between clusters
+  - assess whether one subgroup is associated with a stronger or more displaced upper-level jet
+- `z300` anomaly:
+  - diagnose the mean upper-level trough-ridge pattern
+  - compare whether the clusters differ in large-scale wave geometry, not just low-level structure
+
 ## How success should be judged
 
 The clustering should not be judged only by whether it reproduces subjective notes.
@@ -792,6 +821,75 @@ That validation workflow should test:
 - whether intermediate and strong synoptic subdivisions, such as cluster 2 versus cluster 3 in a `k = 3` solution, remain distinguishable on outside variables
 
 In the current project layout, this validation step belongs in `Notebook 09` rather than in the feature-building and exploratory clustering notebook.
+
+## PCA interpretation for the clustering variables
+
+The clustering itself is run on the standardized four-feature table, not on the PCA scores.
+
+So PCA is still a visualization and interpretation tool, not the clustering algorithm.
+
+The four clustering variables are first standardized:
+
+- `x_std = (x - mean(x)) / std(x)`
+
+for:
+
+- `coastal_to_jpcz_mean_divergence_ratio`
+- `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
+- `front_box_max_temp_gradient_850_tminus12_to_tplus12`
+- `sea_of_japan_mean_vorticity_peak_925`
+
+If the standardized event-by-feature matrix is `X`, PCA applies a singular-value decomposition:
+
+- `X = U S V^T`
+
+The principal-component score matrix is:
+
+- `Scores = X V`
+
+and the loading of feature `m` on principal component `j` is the entry:
+
+- `loading_{m,j} = V_{m,j}`
+
+So the PCA loadings are the coefficients that describe how strongly each original clustering variable contributes to each PC axis.
+
+Interpretation rules:
+
+- the sign of a loading tells the direction of the relationship along that PC axis
+- the absolute magnitude of a loading tells how strongly that feature contributes to that PC
+- the largest-absolute-value loadings are the variables most responsible for separation along that principal component
+
+The explained variance ratio for principal component `j` is:
+
+- `EVR_j = s_j^2 / sum_k s_k^2`
+
+where `s_j` is the `j`th singular value from the SVD.
+
+This means:
+
+- `explained variance ratio` = the fraction of variance in the standardized four-feature matrix captured by that PC
+- `cumulative explained variance` = how much of that standardized variance is captured by the first `N` PCs together
+
+So when `Notebook 10` reports:
+
+- PCA variance tables
+- PCA loading tables
+- PCA driver summaries
+
+those outputs should be read as:
+
+- variance table:
+  - how much of the standardized clustering-feature variance is represented by `PC1`, `PC2`, and `PC3`
+- loading table:
+  - which original clustering variables are most strongly aligned with each PC axis
+- driver summary:
+  - which variables dominate the separation along each PC
+
+This is the correct basis for statements such as:
+
+- which variables drive `PC1`
+- which variables distinguish the broad split versus the refined split
+- whether separation is mainly controlled by synoptic-height forcing, frontality, circulation, or coastal-versus-polygon divergence structure
 
 ## Role of subjective interpretation
 
