@@ -65,7 +65,8 @@ Expected outputs:
 
 Question:
 
-- How does the current divergence/convergence implementation compare with a centered finite-difference alternative?
+- The current implemented method already computes gridded signed divergence from ERA5 winds on the native grid using MetPy's finite-difference divergence operator.
+- How does that implemented gridded-divergence method compare with an alternate explicitly centered finite-difference version built as a sensitivity test?
 - Would events change cluster assignment?
 
 Deliverable:
@@ -78,7 +79,8 @@ Deliverable:
 
 Status:
 
-- not yet built
+- the main implemented method exists and is already finite-difference-based
+- the explicit alternate-method comparison and cluster-switching test are not yet built
 
 ## 4. PCA Diagnostics and Interpretability
 
@@ -98,6 +100,25 @@ Plain-language interpretation target:
   - `sea_of_japan_mean_vorticity_peak_925`
 - The reported variance is the event-to-event variance of that standardized four-feature matrix, not the variance of only convergence, only `z850`, or the gridded composite maps.
 - The loading table is what tells which original variables most strongly define `PC1`, `PC2`, and `PC3`.
+
+Feature-interpretation note for `coastal_to_jpcz_mean_divergence_ratio`:
+
+- when both regional means are negative:
+  - ratio `> 1` means the coastal box is more convergent than the polygon mean, so the event is more coastal-enhanced
+  - ratio between `0` and `1` means the coastal box is still convergent but less convergent than the polygon mean, so the event is more polygon-centered
+- ratio `< 0` means the two regional means have opposite signs, for example one region is convergent while the other is divergent
+- this feature matters because two events can have similar trough depth, frontality, and vorticity but still differ in where the low-level forcing is focused
+- so it adds a spatial-structure dimension to the clustering:
+  - not just how strong the event is
+  - but whether it is more coastal-relative or more centered in the canonical JPCZ polygon
+- in PCA terms:
+  - if this ratio loads strongly on `PC1`, `PC2`, or `PC3`, then that PC is partly a coastal-relative versus polygon-centered axis
+  - if it loads weakly, then that PC is being driven more by trough depth, frontality, or vorticity
+- in the current `k=3` rerun the cluster medians are:
+  - Cluster 1: `0.37`
+  - Cluster 2: `0.65`
+  - Cluster 3: `0.85`
+- that pattern suggests Cluster 1 is the most polygon-centered relative to the coast, Cluster 3 is the most coastal-relative, and Cluster 2 is intermediate
 
 Deliverable:
 

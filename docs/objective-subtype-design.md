@@ -257,7 +257,21 @@ Units:
 
 Purpose:
 
-- Measures how the coastal signed-divergence mean compares with the polygon mean. When both means are negative, values greater than `1` indicate the coastal box is more convergent than the polygon mean, values between `0` and `1` indicate it is less convergent, and negative values indicate opposite-signed regional means.
+- Measures how the coastal signed-divergence mean compares with the polygon mean.
+- When both regional means are negative:
+  - values greater than `1` indicate the coastal box is more convergent than the polygon mean, so the event is more coastal-enhanced
+  - values between `0` and `1` indicate the coastal box is still convergent but less convergent than the polygon mean, so the event is more polygon-centered
+- Negative values indicate opposite-signed regional means, for example one region is convergent while the other is divergent.
+- This feature matters because two events can have similar trough depth, frontality, and vorticity but still differ in where the low-level forcing is focused.
+- So it adds a spatial-structure dimension to the clustering:
+  - not just how strong the event is
+  - but whether it is more coastal-relative or more centered in the canonical JPCZ polygon
+- In PCA terms, if this ratio loads strongly on `PC1`, `PC2`, or `PC3`, then that component is partly a coastal-relative versus polygon-centered axis; if it loads weakly, then the PC is being driven more by trough depth, frontality, or vorticity.
+- In the current corrected `k = 3` rerun, the cluster medians are:
+  - Cluster 1: `0.37`
+  - Cluster 2: `0.65`
+  - Cluster 3: `0.85`
+- That current pattern suggests Cluster 1 is the most polygon-centered relative to the coast, Cluster 3 is the most coastal-relative, and Cluster 2 is intermediate.
 
 ### 3. Pacific-side signed divergence
 
