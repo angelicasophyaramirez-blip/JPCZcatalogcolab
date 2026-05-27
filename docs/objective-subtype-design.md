@@ -87,6 +87,12 @@ Implemented detector math:
   - `du/dx(i, j) ~= (u(i, j+1) - u(i, j-1)) / (x(i, j+1) - x(i, j-1))`
   - `dv/dy(i, j) ~= (v(i+1, j) - v(i-1, j)) / (y(i+1, j) - y(i-1, j))`
 - MetPy handles the actual grid-metric details and edge treatment internally; the equations above are the reproducible finite-difference idea behind the implementation.
+- `Notebook 10` now also includes a direct sensitivity test against an alternate explicit centered finite-difference approximation on the same ERA5 grid.
+- That sensitivity test compares:
+  - the current implemented gridded-divergence composite
+  - the alternate centered finite-difference composite
+  - the centered-minus-implemented difference field
+  - and the percent of events that would change `k = 3` cluster assignment if the divergence-sensitive clustering feature were replaced by the alternate implementation
 - A fixed polygon mask is then applied using the original Shinoda-style JPCZ polygon.
 - In practice, "apply the polygon mask" means:
   - build a boolean array with the same `latitude x longitude` shape as the ERA5 slice

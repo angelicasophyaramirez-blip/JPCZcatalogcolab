@@ -77,10 +77,24 @@ Deliverable:
   - difference panel
 - small table of percent cluster switching
 
+Current source:
+
+- [10_cluster_composites_and_examples.ipynb](/Users/angelica.ramirez/Documents/New%20project/notebooks/10_cluster_composites_and_examples.ipynb)
+
+Expected outputs:
+
+- `k3_divergence_implementation_sensitivity_comparison.nc`
+- `k3_divergence_implementation_event_features.csv`
+- `k3_divergence_implementation_cluster_switching.csv`
+- `k3_divergence_implementation_cluster_crosstab.csv`
+- `k3_divergence_implementation_ratio_summary.csv`
+- `k3_divergence_implementation_sensitivity_panels.png`
+
 Status:
 
-- the main implemented method exists and is already finite-difference-based
-- the explicit alternate-method comparison and cluster-switching test are not yet built
+- the main implemented method exists and is finite-difference-based
+- the alternate explicit centered finite-difference comparison is now built in Notebook 10
+- the cluster-switching summary is now built in Notebook 10
 
 ## 4. PCA Diagnostics and Interpretability
 
