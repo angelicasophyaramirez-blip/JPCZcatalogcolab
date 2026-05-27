@@ -869,6 +869,13 @@ The clustering itself is run on the standardized four-feature table, not on the 
 
 So PCA is still a visualization and interpretation tool, not the clustering algorithm.
 
+In plain language:
+
+- `PC1`, `PC2`, and `PC3` are new statistical axes built from the same four clustering variables.
+- They are not new physical fields and they are not separate clustering variables added by hand.
+- Each PC is a weighted combination of the standardized feature columns, and the weights are the PCA loadings.
+- The variance discussed in the PCA tables is the event-to-event variance of the standardized four-feature matrix, not the variance of only divergence, only `z850`, or the composite maps themselves.
+
 The four clustering variables are first standardized:
 
 - `x_std = (x - mean(x)) / std(x)`
@@ -893,6 +900,13 @@ and the loading of feature `m` on principal component `j` is the entry:
 - `loading_{m,j} = V_{m,j}`
 
 So the PCA loadings are the coefficients that describe how strongly each original clustering variable contributes to each PC axis.
+
+Equivalently:
+
+- `PC1` is the direction in the standardized four-feature event cloud that captures the largest fraction of total event-to-event spread.
+- `PC2` is the next independent direction of spread.
+- `PC3` is the third independent direction of spread.
+- Because the workflow uses four clustering variables, PCA can produce up to four PCs, but the notebook focuses on the first three because they capture most of the standardized variance.
 
 Interpretation rules:
 

@@ -88,6 +88,17 @@ Question:
 - How much variance does each explain?
 - Which original clustering variables load most strongly on each PC?
 
+Plain-language interpretation target:
+
+- `PC1`, `PC2`, and `PC3` are not separate meteorological maps or separate clustering methods.
+- Each PC is a weighted linear combination of the same four standardized clustering variables:
+  - `coastal_to_jpcz_mean_divergence_ratio`
+  - `hokkaido_min_z850_anomaly_tminus12_to_tplus12`
+  - `front_box_max_temp_gradient_850_tminus12_to_tplus12`
+  - `sea_of_japan_mean_vorticity_peak_925`
+- The reported variance is the event-to-event variance of that standardized four-feature matrix, not the variance of only convergence, only `z850`, or the gridded composite maps.
+- The loading table is what tells which original variables most strongly define `PC1`, `PC2`, and `PC3`.
+
 Deliverable:
 
 - variance-explained table
