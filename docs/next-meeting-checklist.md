@@ -8,6 +8,11 @@ Primary notebooks:
 - [09_cluster_validation_and_significance.ipynb](/Users/angelica.ramirez/Documents/New%20project/notebooks/09_cluster_validation_and_significance.ipynb)
 - [10_cluster_composites_and_examples.ipynb](/Users/angelica.ramirez/Documents/New%20project/notebooks/10_cluster_composites_and_examples.ipynb)
 
+Additional sensitivity notebooks:
+
+- [11_temperature_gradient_sensitivity.ipynb](/Users/angelica.ramirez/Documents/New%20project/notebooks/11_temperature_gradient_sensitivity.ipynb)
+- [12_masked_t850_sensitivity.ipynb](/Users/angelica.ramirez/Documents/New%20project/notebooks/12_masked_t850_sensitivity.ipynb)
+
 Core methods note:
 
 - [objective-subtype-design.md](/Users/angelica.ramirez/Documents/New%20project/docs/objective-subtype-design.md)
@@ -194,6 +199,7 @@ Question:
   - number of clusters
   - clustering method
   - zero/missing-data treatment
+  - terrain contamination in the `850 hPa` temperature-gradient feature
 
 Deliverable:
 
@@ -202,7 +208,14 @@ Deliverable:
 Status:
 
 - partly done for cluster count
-- not yet complete for all requested sensitivities
+- `Notebook 11` now tests the drop-variable sensitivity where `T850` is removed entirely
+- that drop-variable test changed `49 / 201` events (`24.38%`) and completely disrupted the old Cluster 2 identity, so `T850` should not simply be dropped
+- `Notebook 12` is the next-step masked-variable sensitivity:
+  - keep the frontality variable
+  - apply a fixed terrain-height mask of `<= 1000 m`
+  - rebuild only the `T850` feature
+  - leave the other clustering features unchanged
+- not yet complete for all requested sensitivities beyond that
 
 ## 8. Reproducibility and Methods Clarity
 
@@ -219,7 +232,7 @@ Deliverable:
 Current source:
 
 - [objective-subtype-design.md](/Users/angelica.ramirez/Documents/New%20project/docs/objective-subtype-design.md)
-- notebooks `08`, `09`, and `10`
+- notebooks `08`, `09`, `10`, `11`, and `12`
 
 ## 9. Link to Event Strength / Hypothesis
 

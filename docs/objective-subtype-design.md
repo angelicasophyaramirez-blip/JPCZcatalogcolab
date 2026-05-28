@@ -366,6 +366,48 @@ Purpose:
 
 - Quantifies whether a frontal or baroclinic zone is present.
 
+### 6a. Terrain-masked `T850` sensitivity used after the first composite review
+
+Sensitivity notebook:
+
+- `12_masked_t850_sensitivity.ipynb`
+
+Why this sensitivity was added:
+
+- The unmasked `850 hPa` temperature-gradient composites in `Notebook 10` still showed strong terrain-linked maxima along the Russian coastal mountains and the Japanese mountain belt even after the display-only colorbar tightening.
+- A separate drop-variable sensitivity in `Notebook 11` showed that simply removing `front_box_max_temp_gradient_850_tminus12_to_tplus12` changed too much of the `k = 3` subtype structure, including a complete loss of the old Cluster 2 identity.
+- Therefore the next conservative test is to keep the frontality variable in the clustering, but rebuild it with a fixed terrain-height mask so that grid cells where the `850 hPa` surface is most likely terrain-contaminated are excluded first.
+
+Implemented mask definition:
+
+- build or restore a static terrain-height field on the objective-subtype domain
+- convert surface geopotential to terrain height in meters when needed
+- keep grid cells with terrain height `<= 1000 m`
+- set grid cells above `1000 m` to `NaN`
+
+Masked `T850` feature calculation:
+
+- For each event and each synoptic offset time (`t-12 h`, `t0`, `t+12 h`):
+  - compute `|grad T850|`
+  - apply the terrain mask so only cells with terrain height `<= 1000 m` remain valid
+  - compute the front-box maximum over the remaining valid cells only
+- The masked event-level frontality feature is then:
+  - `front_box_max_temp_gradient_850_tminus12_to_tplus12_masked_1000m = max_{t in [-12,0,+12]} max_front(|grad T850(t)| where terrain_height <= 1000 m)`
+
+Interpretation:
+
+- This sensitivity keeps the physical idea of a frontality axis but removes the highest-terrain grid cells before the box-maximum is taken.
+- If the masked version preserves a similar `k = 3` structure with cleaner physical interpretation, then the frontality metric should be retained in masked form rather than dropped.
+- If the masked version still destabilizes the refined split, then the safer conclusion is that the broader `k = 2` structure is the more robust first-order partition.
+
+What stays unchanged in this first masked sensitivity:
+
+- the `925 hPa` signed-divergence features are left unchanged
+- the `850 hPa` geopotential-height anomaly features are left unchanged
+- the `925 hPa` Sea-of-Japan vorticity feature is left unchanged
+
+This isolates the effect of the terrain mask to the single feature that was already flagged as both visually terrain-linked and mathematically important to the clustering.
+
 ### 7. Optional Sea of Japan circulation metric
 
 Column names:
