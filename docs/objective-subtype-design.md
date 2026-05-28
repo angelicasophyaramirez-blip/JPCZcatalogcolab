@@ -381,6 +381,7 @@ Why this sensitivity was added:
 Implemented mask definition:
 
 - build or restore a static terrain-height field on the objective-subtype domain
+- derive terrain height only from a preferred ARCO surface-terrain variable such as `geopotential_at_surface`, `surface_geopotential`, or `orography`
 - convert surface geopotential to terrain height in meters when needed
 - keep grid cells with terrain height `<= 1000 m`
 - set grid cells above `1000 m` to `NaN`
