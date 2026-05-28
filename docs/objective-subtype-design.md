@@ -389,6 +389,7 @@ Masked `T850` feature calculation:
 
 - For each event and each synoptic offset time (`t-12 h`, `t0`, `t+12 h`):
   - compute `|grad T850|`
+  - align the cached terrain mask to the ERA5 snapshot grid before applying it
   - apply the terrain mask so only cells with terrain height `<= 1000 m` remain valid
   - compute the front-box maximum over the remaining valid cells only
 - The masked event-level frontality feature is then:
