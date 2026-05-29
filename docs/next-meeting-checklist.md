@@ -210,9 +210,9 @@ Status:
 - partly done for cluster count
 - `Notebook 11` now tests the drop-variable sensitivity where `T850` is removed entirely
 - that drop-variable test changed `49 / 201` events (`24.38%`) and completely disrupted the old Cluster 2 identity, so `T850` should not simply be dropped
-- `Notebook 12` is the next-step masked-variable sensitivity:
+- `Notebook 12` is the next-step screened-variable sensitivity:
   - keep the frontality variable
-  - apply a fixed terrain-height mask of `<= 1000 m`
+  - apply a `surface_pressure >= 900 hPa` screen to the `850 hPa` temperature-gradient field
   - rebuild only the `T850` feature
   - leave the other clustering features unchanged
 - not yet complete for all requested sensitivities beyond that

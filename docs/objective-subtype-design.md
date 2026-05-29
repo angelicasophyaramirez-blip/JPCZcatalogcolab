@@ -366,7 +366,7 @@ Purpose:
 
 - Quantifies whether a frontal or baroclinic zone is present.
 
-### 6a. Terrain-masked `T850` sensitivity used after the first composite review
+### 6a. Surface-pressure-screened `T850` sensitivity used after the first composite review
 
 Sensitivity notebook:
 
@@ -376,39 +376,42 @@ Why this sensitivity was added:
 
 - The unmasked `850 hPa` temperature-gradient composites in `Notebook 10` still showed strong terrain-linked maxima along the Russian coastal mountains and the Japanese mountain belt even after the display-only colorbar tightening.
 - A separate drop-variable sensitivity in `Notebook 11` showed that simply removing `front_box_max_temp_gradient_850_tminus12_to_tplus12` changed too much of the `k = 3` subtype structure, including a complete loss of the old Cluster 2 identity.
-- Therefore the next conservative test is to keep the frontality variable in the clustering, but rebuild it with a fixed terrain-height mask so that grid cells where the `850 hPa` surface is most likely terrain-contaminated are excluded first.
+- Therefore the next conservative test is to keep the frontality variable in the clustering, but rebuild it with a surface-pressure screen so that grid cells where the local `850 hPa` level is too close to, or below, the surface are excluded first.
 
-Implemented mask definition:
+Implemented screening definition:
 
-- build or restore a static terrain-height field on the objective-subtype domain
-- derive terrain height only from a preferred ARCO surface-terrain variable such as `geopotential_at_surface`, `surface_geopotential`, or `orography`
-- convert surface geopotential to terrain height in meters when needed
-- keep grid cells with terrain height `<= 1000 m`
-- set grid cells above `1000 m` to `NaN`
+- use ERA5 `surface_pressure` on the same objective-subtype domain and analysis times as the `850 hPa` temperature field
+- normalize that `surface_pressure` field to `Pa` before thresholding if the source metadata or value range indicates `hPa`
+- keep grid cells only where `surface_pressure >= 900 hPa`
+- set grid cells with `surface_pressure < 900 hPa` to `NaN`
+- interpret this as a conservative pressure-space screen for places where the `850 hPa` level is too close to, or below, the local ground surface
 
-Masked `T850` feature calculation:
+Pressure-screened `T850` feature calculation:
 
 - For each event and each synoptic offset time (`t-12 h`, `t0`, `t+12 h`):
   - compute `|grad T850|`
-  - align the cached terrain mask to the ERA5 snapshot grid before applying it
-  - apply the terrain mask so only cells with terrain height `<= 1000 m` remain valid
+  - load `surface_pressure` on the same time and domain
+  - build the boolean screen where `surface_pressure >= 900 hPa`
+  - align that screen to the ERA5 `850 hPa` temperature-gradient grid before applying it
+  - apply the screen so only cells with `surface_pressure >= 900 hPa` remain valid
   - compute the front-box maximum over the remaining valid cells only
-- The masked event-level frontality feature is then:
-  - `front_box_max_temp_gradient_850_tminus12_to_tplus12_masked_1000m = max_{t in [-12,0,+12]} max_front(|grad T850(t)| where terrain_height <= 1000 m)`
+- The screened event-level frontality feature is then:
+  - `front_box_max_temp_gradient_850_tminus12_to_tplus12_screened_sp900hpa = max_{t in [-12,0,+12]} max_front(|grad T850(t)| where surface_pressure >= 900 hPa)`
 
 Interpretation:
 
-- This sensitivity keeps the physical idea of a frontality axis but removes the highest-terrain grid cells before the box-maximum is taken.
-- If the masked version preserves a similar `k = 3` structure with cleaner physical interpretation, then the frontality metric should be retained in masked form rather than dropped.
-- If the masked version still destabilizes the refined split, then the safer conclusion is that the broader `k = 2` structure is the more robust first-order partition.
+- This sensitivity keeps the physical idea of a frontality axis but removes grid cells where the `850 hPa` level is likely too terrain-influenced to behave like a clean free-atmosphere diagnostic.
+- The fixed terrain-height approach was abandoned in this workflow because it did not produce a credible retained-cell mask in the Hokkaido front box.
+- If the pressure-screened version preserves a similar `k = 3` structure with cleaner physical interpretation, then the frontality metric should be retained in screened form rather than dropped.
+- If the pressure-screened version still destabilizes the refined split, then the safer conclusion is that the broader `k = 2` structure is the more robust first-order partition.
 
-What stays unchanged in this first masked sensitivity:
+What stays unchanged in this first screened sensitivity:
 
 - the `925 hPa` signed-divergence features are left unchanged
 - the `850 hPa` geopotential-height anomaly features are left unchanged
 - the `925 hPa` Sea-of-Japan vorticity feature is left unchanged
 
-This isolates the effect of the terrain mask to the single feature that was already flagged as both visually terrain-linked and mathematically important to the clustering.
+This isolates the effect of the surface-pressure screen to the single feature that was already flagged as both visually terrain-linked and mathematically important to the clustering.
 
 ### 7. Optional Sea of Japan circulation metric
 
