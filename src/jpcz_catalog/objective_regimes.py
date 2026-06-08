@@ -22,6 +22,40 @@ def ensure_event_index(catalog_df: pd.DataFrame) -> pd.DataFrame:
     return catalog
 
 
+def assign_objective_labels_from_thresholds(
+    metrics_df: pd.DataFrame,
+    *,
+    polygon_qflux_min: float,
+    polygon_div_max: float,
+    coastal_qflux_split: float,
+    coastal_div_max: float,
+) -> pd.DataFrame:
+    """Apply the simplified offshore/coastal regime rules to an event table."""
+    labeled_df = metrics_df.copy()
+    offshore_mask = (
+        np.isfinite(labeled_df["polygon_qflux_850_mean"])
+        & np.isfinite(labeled_df["polygon_div_925_mean"])
+        & np.isfinite(labeled_df["coastal_qflux_850_mean"])
+        & (labeled_df["polygon_qflux_850_mean"] >= polygon_qflux_min)
+        & (labeled_df["polygon_div_925_mean"] <= polygon_div_max)
+        & (labeled_df["coastal_qflux_850_mean"] < coastal_qflux_split)
+    )
+    coastal_mask = (
+        np.isfinite(labeled_df["coastal_qflux_850_mean"])
+        & np.isfinite(labeled_df["coastal_div_925_mean"])
+        & (labeled_df["coastal_qflux_850_mean"] >= coastal_qflux_split)
+        & (labeled_df["coastal_div_925_mean"] <= coastal_div_max)
+    )
+    labels = np.full(len(labeled_df), DEFAULT_OBJECTIVE_LABEL, dtype=object)
+    labels[offshore_mask.values] = OFFSHORE_LABEL
+    labels[coastal_mask.values] = COASTAL_LABEL
+    labels[(offshore_mask & coastal_mask).values] = MIXED_LABEL
+    labeled_df["offshore_rule_pass"] = offshore_mask.astype(bool)
+    labeled_df["coastal_rule_pass"] = coastal_mask.astype(bool)
+    labeled_df["objective_regime_label"] = labels
+    return labeled_df
+
+
 def collapse_label_sequence(
     labels: Iterable[str],
     *,
@@ -159,9 +193,19 @@ def summarize_objective_episodes(
             and pd.notna(first_coastal_peak)
             and first_offshore_peak < first_coastal_peak
         )
-        lag_hours = (
+        offshore_to_coastal_lag_hours = (
             float((first_coastal_peak - first_offshore_peak).total_seconds() / 3600.0)
             if offshore_precedes_coastal
+            else np.nan
+        )
+        coastal_precedes_offshore = bool(
+            pd.notna(first_offshore_peak)
+            and pd.notna(first_coastal_peak)
+            and first_coastal_peak < first_offshore_peak
+        )
+        coastal_to_offshore_lag_hours = (
+            float((first_offshore_peak - first_coastal_peak).total_seconds() / 3600.0)
+            if coastal_precedes_offshore
             else np.nan
         )
 
@@ -183,7 +227,9 @@ def summarize_objective_episodes(
             "last_event_peak_jst": episode_df[event_peak_jst_column].max() if event_peak_jst_column in episode_df.columns else pd.NaT,
             "collapsed_clear_sequence": " -> ".join(clear_sequence) if clear_sequence else "weak_only",
             "offshore_precedes_coastal": offshore_precedes_coastal,
-            "offshore_to_coastal_lag_hours": lag_hours,
+            "offshore_to_coastal_lag_hours": offshore_to_coastal_lag_hours,
+            "coastal_precedes_offshore": coastal_precedes_offshore,
+            "coastal_to_offshore_lag_hours": coastal_to_offshore_lag_hours,
             "first_offshore_peak": first_offshore_peak,
             "first_coastal_peak": first_coastal_peak,
         }
@@ -202,6 +248,8 @@ def summarize_objective_episodes(
                 "objective_episode_regime_path",
                 "offshore_precedes_coastal",
                 "offshore_to_coastal_lag_hours",
+                "coastal_precedes_offshore",
+                "coastal_to_offshore_lag_hours",
             ]
         ],
         on="objective_episode_id",
@@ -238,6 +286,14 @@ def summarize_gap_sensitivity(
                 episode_summary_df.loc[
                     episode_summary_df["offshore_precedes_coastal"],
                     "offshore_to_coastal_lag_hours",
+                ].median()
+            )
+            if not episode_summary_df.empty
+            else np.nan,
+            "median_coastal_to_offshore_lag_hours": float(
+                episode_summary_df.loc[
+                    episode_summary_df["coastal_precedes_offshore"],
+                    "coastal_to_offshore_lag_hours",
                 ].median()
             )
             if not episode_summary_df.empty
