@@ -104,6 +104,7 @@ def assign_objective_episode_ids(
     labeled_df: pd.DataFrame,
     *,
     gap_hours: float,
+    episode_prefix: str = "obj",
     event_start_column: str = "event_start",
     event_end_column: str = "event_end",
     event_peak_column: str = "event_peak",
@@ -147,7 +148,7 @@ def assign_objective_episode_ids(
         if start_new_episode:
             episode_counter += 1
 
-        episode_ids.append(f"obj_{int(gap_hours):02d}h_{episode_counter:03d}")
+        episode_ids.append(f"{episode_prefix}_{int(gap_hours):02d}h_{episode_counter:03d}")
         gap_from_previous_hours.append(gap_hours_value)
         previous_end = current_end
         previous_peak = current_peak
@@ -256,6 +257,79 @@ def summarize_objective_episodes(
         how="left",
     )
     return event_level_df, episode_summary_df
+
+
+def summarize_padded_spell_windows(
+    catalog_df: pd.DataFrame,
+    *,
+    gap_hours: float,
+    padding_hours: float,
+    episode_prefix: str = "catalog",
+    event_start_column: str = "event_start",
+    event_end_column: str = "event_end",
+    event_peak_column: str = "event_peak",
+    event_peak_jst_column: str = "event_peak_jst",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Group the catalog into broader timing-only spells plus padded analysis windows."""
+    spell_event_df = assign_objective_episode_ids(
+        catalog_df,
+        gap_hours=gap_hours,
+        episode_prefix=episode_prefix,
+        event_start_column=event_start_column,
+        event_end_column=event_end_column,
+        event_peak_column=event_peak_column,
+    )
+
+    padding_delta = pd.Timedelta(hours=float(padding_hours))
+    summary_rows: list[dict[str, object]] = []
+    for spell_id, spell_df in spell_event_df.groupby("objective_episode_id", sort=False):
+        spell_df = spell_df.sort_values(event_peak_column).copy()
+        spell_start = spell_df[event_start_column].min() if event_start_column in spell_df.columns else pd.NaT
+        spell_end = spell_df[event_end_column].max() if event_end_column in spell_df.columns else pd.NaT
+        first_peak = spell_df[event_peak_column].min() if event_peak_column in spell_df.columns else pd.NaT
+        last_peak = spell_df[event_peak_column].max() if event_peak_column in spell_df.columns else pd.NaT
+        analysis_start = spell_start - padding_delta if pd.notna(spell_start) else pd.NaT
+        analysis_end = spell_end + padding_delta if pd.notna(spell_end) else pd.NaT
+
+        summary_rows.append(
+            {
+                "catalog_spell_id": spell_id,
+                "catalog_spell_gap_hours": float(gap_hours),
+                "analysis_padding_hours": float(padding_hours),
+                "event_count": int(len(spell_df)),
+                "spell_start": spell_start,
+                "spell_end": spell_end,
+                "first_event_peak": first_peak,
+                "last_event_peak": last_peak,
+                "first_event_peak_jst": spell_df[event_peak_jst_column].min()
+                if event_peak_jst_column in spell_df.columns
+                else pd.NaT,
+                "last_event_peak_jst": spell_df[event_peak_jst_column].max()
+                if event_peak_jst_column in spell_df.columns
+                else pd.NaT,
+                "analysis_start": analysis_start,
+                "analysis_end": analysis_end,
+                "spell_duration_hours": (
+                    float((spell_end - spell_start).total_seconds() / 3600.0)
+                    if pd.notna(spell_start) and pd.notna(spell_end)
+                    else np.nan
+                ),
+                "analysis_window_hours": (
+                    float((analysis_end - analysis_start).total_seconds() / 3600.0)
+                    if pd.notna(analysis_start) and pd.notna(analysis_end)
+                    else np.nan
+                ),
+                "max_internal_gap_hours": float(spell_df["gap_from_previous_event_hours"].dropna().max())
+                if spell_df["gap_from_previous_event_hours"].notna().any()
+                else 0.0,
+            }
+        )
+
+    spell_summary_df = pd.DataFrame(summary_rows)
+    spell_event_df = spell_event_df.rename(columns={"objective_episode_id": "catalog_spell_id"})
+    spell_event_df["catalog_spell_gap_hours"] = float(gap_hours)
+    spell_event_df["analysis_padding_hours"] = float(padding_hours)
+    return spell_event_df, spell_summary_df
 
 
 def summarize_gap_sensitivity(

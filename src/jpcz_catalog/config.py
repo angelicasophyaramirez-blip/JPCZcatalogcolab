@@ -102,6 +102,14 @@ PACIFIC_FRONT_BOX = BoundingBox(
     lat_max=42.0,
 )
 
+# Terrain-sensitive low-level metrics can spuriously light up along the
+# Russian coast, so several notebooks mask those grid cells before
+# computing divergence and moisture-proxy summaries.
+RUSSIAN_COASTAL_EXCLUSION_BOXES = (
+    BoundingBox(lon_min=130.5, lon_max=135.5, lat_min=42.0, lat_max=45.0),
+    BoundingBox(lon_min=133.5, lon_max=139.5, lat_min=44.0, lat_max=47.25),
+)
+
 # First-pass digitization from Shinoda Figure 2. These values are intended
 # to be refined only if validation indicates a clear mismatch.
 JPCZ_POLYGON_VERTICES = (
