@@ -28,6 +28,7 @@ Planned order:
 22. `22_objective_coastal_box_metrics_and_labels.ipynb`
 23. `23_objective_regime_timing_and_impact.ipynb`
 24. `24_objective_regime_manual_verification_atlas.ipynb`
+25. `25_continuous_spell_evolution_and_onset_timing.ipynb`
 
 Design rule:
 
@@ -53,5 +54,6 @@ Design rule:
 - Notebook 19 tests whether the older cleaned-cluster labels behave like a before/after timing sequence
 - Notebook 20 checks the eastern Siberian high / blocking-side context
 - Notebook 22 resets the classification around a simpler objective coastal-wedge versus JPCZ-polygon framework using only moisture-flux and divergence means
-- Notebook 23 converts those objective labels into spells/episodes, transition timing, and the future merge point for a coastal snow / precipitation impact table
+- Notebook 23 keeps the peak-event timing baseline, transition counts, and the future merge point for a coastal snow / precipitation impact table
 - Notebook 24 is the manual-review atlas for the new workflow, tying objective labels and spell timing to moisture, divergence, quicklook, OLR, and satellite context
+- Notebook 25 extends the timing work to broader padded spell windows so offshore/coastal evolution can be tracked continuously instead of only at event peaks
