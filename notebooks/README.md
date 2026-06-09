@@ -56,4 +56,4 @@ Design rule:
 - Notebook 22 resets the classification around a simpler objective coastal-wedge versus JPCZ-polygon framework using only moisture-flux and divergence means
 - Notebook 23 keeps the peak-event timing baseline, transition counts, and the future merge point for a coastal snow / precipitation impact table
 - Notebook 24 is the manual-review atlas for the new workflow, tying objective labels and spell timing to moisture, divergence, quicklook, OLR, and satellite context
-- Notebook 25 extends the timing work to broader padded spell windows so offshore/coastal evolution can be tracked continuously instead of only at event peaks
+- Notebook 25 builds broader catalog spells first, checkpoints reusable continuous spell means, and then applies the candidate threshold profiles through time so offshore/coastal evolution can be tracked beyond event peaks
