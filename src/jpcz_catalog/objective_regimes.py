@@ -288,6 +288,10 @@ def summarize_padded_spell_windows(
         spell_end = spell_df[event_end_column].max() if event_end_column in spell_df.columns else pd.NaT
         first_peak = spell_df[event_peak_column].min() if event_peak_column in spell_df.columns else pd.NaT
         last_peak = spell_df[event_peak_column].max() if event_peak_column in spell_df.columns else pd.NaT
+        if pd.isna(spell_start):
+            spell_start = first_peak
+        if pd.isna(spell_end):
+            spell_end = last_peak
         analysis_start = spell_start - padding_delta if pd.notna(spell_start) else pd.NaT
         analysis_end = spell_end + padding_delta if pd.notna(spell_end) else pd.NaT
 
