@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import matplotlib.pyplot as plt
+import matplotlib.transforms as mtransforms
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -48,6 +49,18 @@ DEFAULT_OMEGA_LEVELS_PA_S = np.array(
 )
 DEFAULT_MOISTURE_PROXY_LEVELS = np.array(
     [-2.5, -2.0, -1.5, -1.0, -0.6, -0.3, -0.1, 0.1, 0.3, 0.6, 1.0, 1.5, 2.0, 2.5]
+)
+
+REFERENCE_POINTS: tuple[dict[str, object], ...] = (
+    {"name": "Fukui", "lon": 136.2216, "lat": 36.0652, "kind": "city"},
+    {"name": "Kanazawa", "lon": 136.6562, "lat": 36.5613, "kind": "city"},
+    {"name": "Toyama", "lon": 137.2137, "lat": 36.6953, "kind": "city"},
+    {"name": "Niigata", "lon": 139.0236, "lat": 37.9161, "kind": "city"},
+    {"name": "Akita", "lon": 140.1025, "lat": 39.7199, "kind": "city"},
+    {"name": "Hakusan", "lon": 136.7710, "lat": 36.1550, "kind": "mountain"},
+    {"name": "Hida Range", "lon": 137.6400, "lat": 36.3000, "kind": "mountain"},
+    {"name": "Ryohaku Mts.", "lon": 136.7000, "lat": 36.0500, "kind": "mountain"},
+    {"name": "Echigo Mts.", "lon": 138.9000, "lat": 36.9000, "kind": "mountain"},
 )
 
 
@@ -293,6 +306,78 @@ def compute_terrain_section_pressure_hpa(
     return terrain_section, terrain_pressure_hpa
 
 
+def _reference_positions_along_transect(
+    transect: Transect,
+    *,
+    max_city_labels: int = 2,
+    max_mountain_labels: int = 2,
+    max_cross_distance_km: float = 70.0,
+) -> list[dict[str, object]]:
+    """Return a small set of named places close to the transect."""
+    mean_lat_rad = np.deg2rad(0.5 * (transect.start_lat + transect.end_lat))
+    transect_length_km = float(transect.distance_km.values[-1])
+    selected: list[dict[str, object]] = []
+
+    for ref in REFERENCE_POINTS:
+        dx_m = EARTH_RADIUS_M * np.cos(mean_lat_rad) * np.deg2rad(float(ref["lon"]) - transect.start_lon)
+        dy_m = EARTH_RADIUS_M * np.deg2rad(float(ref["lat"]) - transect.start_lat)
+        along_km = (dx_m * transect.along_unit_x + dy_m * transect.along_unit_y) / 1000.0
+        cross_km = (-dx_m * transect.along_unit_y + dy_m * transect.along_unit_x) / 1000.0
+        if along_km < 0.0 or along_km > transect_length_km:
+            continue
+        if abs(cross_km) > max_cross_distance_km:
+            continue
+        selected.append(
+            {
+                "name": str(ref["name"]),
+                "kind": str(ref["kind"]),
+                "distance_km": float(along_km),
+                "cross_km": float(cross_km),
+            }
+        )
+
+    cities = sorted((item for item in selected if item["kind"] == "city"), key=lambda item: abs(float(item["cross_km"])))[:max_city_labels]
+    mountains = sorted((item for item in selected if item["kind"] == "mountain"), key=lambda item: abs(float(item["cross_km"])))[:max_mountain_labels]
+    combined = sorted([*cities, *mountains], key=lambda item: float(item["distance_km"]))
+    return combined
+
+
+def _annotate_transect_reference_labels(ax, transect: Transect) -> None:
+    """Annotate a few nearby cities or mountain ranges below the section axis."""
+    references = _reference_positions_along_transect(transect)
+    if not references:
+        return
+
+    transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+    style_map = {
+        "city": {"color": "#1d4ed8", "linecolor": "#60a5fa", "y_text": -0.15},
+        "mountain": {"color": "#166534", "linecolor": "#65a30d", "y_text": -0.26},
+    }
+    for ref in references:
+        style = style_map.get(str(ref["kind"]), style_map["city"])
+        distance_km = float(ref["distance_km"])
+        ax.plot(
+            [distance_km, distance_km],
+            [0.0, -0.06],
+            transform=transform,
+            color=str(style["linecolor"]),
+            linewidth=1.1,
+            clip_on=False,
+            solid_capstyle="round",
+        )
+        ax.text(
+            distance_km,
+            float(style["y_text"]),
+            str(ref["name"]),
+            transform=transform,
+            ha="center",
+            va="top",
+            fontsize=8,
+            color=str(style["color"]),
+            clip_on=False,
+        )
+
+
 def interpolate_section_to_theta_coordinates(
     theta_section: xr.DataArray,
     value_section: xr.DataArray,
@@ -502,7 +587,7 @@ def plot_pressure_cross_section_figure(
         sharex=True,
         gridspec_kw={"height_ratios": [1.0, 1.0, 1.0]},
     )
-    fig.subplots_adjust(top=0.92, bottom=0.08, left=0.09, right=0.92, hspace=0.24)
+    fig.subplots_adjust(top=0.92, bottom=0.16, left=0.09, right=0.92, hspace=0.24)
 
     omega_fill, _ = _draw_pressure_panel(
         axes[0],
@@ -556,6 +641,8 @@ def plot_pressure_cross_section_figure(
     ]:
         colorbar = fig.colorbar(fill, ax=axis, orientation="horizontal", pad=0.08, aspect=45)
         colorbar.set_label(label)
+
+    _annotate_transect_reference_labels(axes[2], transect)
 
     fig.suptitle(
         f"Cross sections | {group_id} | {time_role} | {analysis_time:%Y-%m-%d %H:%M UTC}",
