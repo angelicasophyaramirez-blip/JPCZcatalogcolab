@@ -446,7 +446,7 @@ def _annotate_transect_reference_labels(
     transect: Transect,
     terrain_height_m: xr.DataArray | None,
 ) -> None:
-    """Annotate a small, stable set of place labels below the bottom section axis."""
+    """Annotate a small, stable set of place labels in a low reference strip."""
     transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
     labels: list[dict[str, object]] = []
 
@@ -478,16 +478,16 @@ def _annotate_transect_reference_labels(
         return
 
     style_map = {
-        "city": {"color": "#1d4ed8", "linecolor": "#60a5fa", "y_text": -0.12},
-        "sea": {"color": "#0f3d91", "linecolor": "#3b82f6", "y_text": -0.20},
-        "mountain": {"color": "#166534", "linecolor": "#65a30d", "y_text": -0.28},
+        "city": {"color": "#1d4ed8", "linecolor": "#60a5fa", "y_text": 0.08},
+        "sea": {"color": "#0f3d91", "linecolor": "#3b82f6", "y_text": 0.17},
+        "mountain": {"color": "#166534", "linecolor": "#65a30d", "y_text": 0.26},
     }
     for label in sorted(labels, key=lambda item: float(item["distance_km"])):
         style = style_map[str(label["kind"])]
         distance_km = float(label["distance_km"])
         ax.plot(
             [distance_km, distance_km],
-            [0.0, -0.05],
+            [0.0, float(style["y_text"]) - 0.02],
             transform=transform,
             color=str(style["linecolor"]),
             linewidth=1.2,
@@ -505,6 +505,7 @@ def _annotate_transect_reference_labels(
             color=str(style["color"]),
             bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.82, "pad": 0.6},
             clip_on=False,
+            zorder=10,
         )
 
 
@@ -587,6 +588,7 @@ def _draw_pressure_panel(
     terrain_pressure_hpa: xr.DataArray | None,
     terrain_height_m: xr.DataArray | None,
     theta_color: str = "#8b0000",
+    wind_render_mode: str = "vectors",
     panel_extend: str = "both",
     extra_contours: tuple[xr.DataArray, np.ndarray, str, float, str] | None = None,
 ) -> tuple[object, object]:
@@ -638,32 +640,61 @@ def _draw_pressure_panel(
 
     point_stride = max(1, section_field.sizes["point"] // 22)
     level_stride = max(1, section_field.sizes["level"] // 8)
-    q = ax.quiver(
-        np.asarray(section_field["distance_km"].values, dtype=float)[::point_stride],
-        np.asarray(section_field["level"].values, dtype=float)[::level_stride],
-        np.asarray(along_wind_section.values, dtype=float)[::level_stride, ::point_stride],
-        np.asarray(omega_section.values, dtype=float)[::level_stride, ::point_stride] * OMEGA_VECTOR_SCALE,
-        color="black",
-        angles="xy",
-        scale_units="xy",
-        scale=1.0,
-        width=0.0018,
-        headwidth=3.4,
-        headlength=4.5,
-        headaxislength=3.8,
-        alpha=0.75,
-        zorder=5,
-    )
-    ax.quiverkey(
-        q,
-        0.99,
-        1.02,
-        20.0,
-        "20 m s$^{-1}$ total along-section wind",
-        coordinates="axes",
-        labelpos="E",
-        fontproperties={"size": 8},
-    )
+    x_sample = np.asarray(section_field["distance_km"].values, dtype=float)[::point_stride]
+    y_sample = np.asarray(section_field["level"].values, dtype=float)[::level_stride]
+    along_sample = np.asarray(along_wind_section.values, dtype=float)[::level_stride, ::point_stride]
+    omega_sample = np.asarray(omega_section.values, dtype=float)[::level_stride, ::point_stride] * OMEGA_VECTOR_SCALE
+
+    if str(wind_render_mode).lower() == "barbs":
+        ax.barbs(
+            x_sample[np.newaxis, :].repeat(len(y_sample), axis=0),
+            y_sample[:, np.newaxis].repeat(len(x_sample), axis=1),
+            along_sample,
+            omega_sample,
+            length=5.0,
+            linewidth=0.55,
+            barbcolor="black",
+            flagcolor="black",
+            alpha=0.72,
+            zorder=5,
+        )
+        ax.text(
+            0.99,
+            1.02,
+            "Wind barbs",
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=8,
+            color="#111827",
+        )
+    else:
+        q = ax.quiver(
+            x_sample,
+            y_sample,
+            along_sample,
+            omega_sample,
+            color="black",
+            angles="xy",
+            scale_units="xy",
+            scale=1.0,
+            width=0.0018,
+            headwidth=3.4,
+            headlength=4.5,
+            headaxislength=3.8,
+            alpha=0.75,
+            zorder=5,
+        )
+        ax.quiverkey(
+            q,
+            0.99,
+            1.02,
+            20.0,
+            "20 m s$^{-1}$ total along-section wind",
+            coordinates="axes",
+            labelpos="E",
+            fontproperties={"size": 8},
+        )
 
     if terrain_pressure_hpa is not None:
         x_distance = np.asarray(section_field["distance_km"].values, dtype=float)
@@ -708,6 +739,7 @@ def plot_pressure_cross_section_figure(
     analysis_time: pd.Timestamp,
     group_id: str,
     time_role: str,
+    wind_render_mode: str = "vectors",
 ) -> plt.Figure:
     """Create the stacked pressure-coordinate section figure."""
     fig, axes = plt.subplots(
@@ -717,7 +749,9 @@ def plot_pressure_cross_section_figure(
         sharex=True,
         gridspec_kw={"height_ratios": [1.0, 1.0, 1.0]},
     )
-    fig.subplots_adjust(top=0.92, bottom=0.26, left=0.09, right=0.92, hspace=0.24)
+    fig.subplots_adjust(top=0.92, bottom=0.30, left=0.09, right=0.92, hspace=0.24)
+
+    wind_label = "wind barbs" if str(wind_render_mode).lower() == "barbs" else "vectors"
 
     omega_fill, _ = _draw_pressure_panel(
         axes[0],
@@ -725,12 +759,13 @@ def plot_pressure_cross_section_figure(
         cmap="RdBu_r",
         levels=DEFAULT_OMEGA_LEVELS_PA_S,
         colorbar_label="Omega [Pa s$^{-1}$]",
-        title="Jet-normal pressure section: omega shading, theta contours, and total along-section wind + scaled omega vectors",
+        title=f"Jet-normal pressure section: omega shading, theta contours, and total along-section wind + scaled omega {wind_label}",
         theta_section=theta_section,
         along_wind_section=along_wind_section,
         omega_section=omega_section,
         terrain_pressure_hpa=terrain_pressure_hpa,
         terrain_height_m=terrain_height_m,
+        wind_render_mode=wind_render_mode,
     )
 
     moisture_fill, _ = _draw_pressure_panel(
@@ -739,12 +774,13 @@ def plot_pressure_cross_section_figure(
         cmap="BrBG",
         levels=DEFAULT_MOISTURE_PROXY_LEVELS,
         colorbar_label="q × (-omega) [1e-3 Pa s$^{-1}$]",
-        title="Moist-ascent surrogate section: q × (-omega) shading with theta and total along-section wind + scaled omega vectors",
+        title=f"Moist-ascent surrogate section: q × (-omega) shading with theta and total along-section wind + scaled omega {wind_label}",
         theta_section=theta_section,
         along_wind_section=along_wind_section,
         omega_section=omega_section,
         terrain_pressure_hpa=terrain_pressure_hpa,
         terrain_height_m=terrain_height_m,
+        wind_render_mode=wind_render_mode,
     )
 
     pv_fill, _ = _draw_pressure_panel(
@@ -753,12 +789,13 @@ def plot_pressure_cross_section_figure(
         cmap="viridis",
         levels=DEFAULT_PV_LEVELS_PVU,
         colorbar_label="Potential vorticity [PVU]",
-        title="PV-focused section: PV shading, theta contours, total along-section wind + scaled omega vectors, and the 2-PVU line",
+        title=f"PV-focused section: PV shading, theta contours, total along-section wind + scaled omega {wind_label}, and the 2-PVU line",
         theta_section=theta_section,
         along_wind_section=along_wind_section,
         omega_section=omega_section,
         terrain_pressure_hpa=terrain_pressure_hpa,
         terrain_height_m=terrain_height_m,
+        wind_render_mode=wind_render_mode,
         extra_contours=(pv_section, np.array([2.0]), "#f59e0b", 2.4, "2 PVU"),
         panel_extend="max",
     )
@@ -769,7 +806,7 @@ def plot_pressure_cross_section_figure(
         (axes[1], moisture_fill, "q × (-omega) [1e-3 Pa s$^{-1}$]"),
         (axes[2], pv_fill, "Potential vorticity [PVU]"),
     ]):
-        pad = 0.08 if index < 2 else 0.16
+        pad = 0.08 if index < 2 else 0.20
         colorbar = fig.colorbar(fill, ax=axis, orientation="horizontal", pad=pad, aspect=45)
         colorbar.set_label(label)
 
@@ -783,7 +820,7 @@ def plot_pressure_cross_section_figure(
     fig.text(
         0.5,
         0.955,
-        "Vectors show total along-section wind with scaled omega; they are not geostrophic or ageostrophic-separated.",
+        f"{'Wind barbs' if str(wind_render_mode).lower() == 'barbs' else 'Vectors'} show total along-section wind with scaled omega; they are not geostrophic or ageostrophic-separated.",
         ha="center",
         va="top",
         fontsize=9,
