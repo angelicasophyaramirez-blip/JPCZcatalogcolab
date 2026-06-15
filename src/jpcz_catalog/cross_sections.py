@@ -57,10 +57,12 @@ REFERENCE_POINTS: tuple[dict[str, object], ...] = (
     {"name": "Toyama", "lon": 137.2137, "lat": 36.6953, "kind": "city"},
     {"name": "Niigata", "lon": 139.0236, "lat": 37.9161, "kind": "city"},
     {"name": "Akita", "lon": 140.1025, "lat": 39.7199, "kind": "city"},
+    {"name": "Aomori", "lon": 140.7400, "lat": 40.8222, "kind": "city"},
     {"name": "Hakusan", "lon": 136.7710, "lat": 36.1550, "kind": "mountain"},
     {"name": "Hida Range", "lon": 137.6400, "lat": 36.3000, "kind": "mountain"},
     {"name": "Ryohaku Mts.", "lon": 136.7000, "lat": 36.0500, "kind": "mountain"},
     {"name": "Echigo Mts.", "lon": 138.9000, "lat": 36.9000, "kind": "mountain"},
+    {"name": "Ou Mts.", "lon": 140.1000, "lat": 39.2500, "kind": "mountain"},
 )
 
 
@@ -342,38 +344,166 @@ def _reference_positions_along_transect(
     return combined
 
 
-def _annotate_transect_reference_labels(ax, transect: Transect) -> None:
-    """Annotate a few nearby cities or mountain ranges below the section axis."""
-    references = _reference_positions_along_transect(transect)
-    if not references:
+def _select_primary_city_reference(transect: Transect) -> dict[str, object] | None:
+    """Return one representative coastal city near the transect."""
+    references = _reference_positions_along_transect(
+        transect,
+        max_city_labels=4,
+        max_mountain_labels=0,
+        max_cross_distance_km=55.0,
+    )
+    city_refs = [item for item in references if item["kind"] == "city"]
+    if not city_refs:
+        return None
+    return min(city_refs, key=lambda item: (abs(float(item["cross_km"])), float(item["distance_km"])))
+
+
+def _select_primary_mountain_reference(
+    transect: Transect,
+    terrain_height_m: xr.DataArray | None,
+) -> dict[str, object] | None:
+    """Return one representative mountain label near the highest terrain peak."""
+    references = _reference_positions_along_transect(
+        transect,
+        max_city_labels=0,
+        max_mountain_labels=6,
+        max_cross_distance_km=95.0,
+    )
+    mountain_refs = [item for item in references if item["kind"] == "mountain"]
+    if not mountain_refs:
+        return None
+
+    if terrain_height_m is None or not np.isfinite(terrain_height_m.values).any():
+        return min(mountain_refs, key=lambda item: abs(float(item["cross_km"])))
+
+    terrain_values = np.asarray(terrain_height_m.values, dtype=float)
+    peak_index = int(np.nanargmax(terrain_values))
+    peak_distance_km = float(transect.distance_km.values[peak_index])
+    return min(
+        mountain_refs,
+        key=lambda item: (
+            abs(float(item["distance_km"]) - peak_distance_km),
+            abs(float(item["cross_km"])),
+        ),
+    )
+
+
+def _find_sea_of_japan_label_position(
+    transect: Transect,
+    terrain_height_m: xr.DataArray | None,
+) -> float | None:
+    """Approximate where the Sea of Japan enters the transect."""
+    if terrain_height_m is None or not np.isfinite(terrain_height_m.values).any():
+        return None
+
+    terrain_values = np.asarray(terrain_height_m.values, dtype=float)
+    distance_values = np.asarray(transect.distance_km.values, dtype=float)
+    water_mask = np.isfinite(terrain_values) & (terrain_values <= 20.0)
+    if not np.any(water_mask):
+        return None
+
+    run_bounds: list[tuple[int, int]] = []
+    in_run = False
+    start_idx = 0
+    for idx, is_water in enumerate(water_mask):
+        if is_water and not in_run:
+            in_run = True
+            start_idx = idx
+        elif not is_water and in_run:
+            run_bounds.append((start_idx, idx - 1))
+            in_run = False
+    if in_run:
+        run_bounds.append((start_idx, len(water_mask) - 1))
+
+    endpoint_runs = []
+    for start_idx, end_idx in run_bounds:
+        if end_idx - start_idx + 1 < 3:
+            continue
+        if start_idx == 0 or end_idx == len(water_mask) - 1:
+            midpoint_idx = (start_idx + end_idx) // 2
+            lon_mid = float(transect.lon.values[midpoint_idx])
+            endpoint_runs.append(
+                {
+                    "start_idx": start_idx,
+                    "end_idx": end_idx,
+                    "midpoint_distance_km": float(distance_values[midpoint_idx]),
+                    "midpoint_lon": lon_mid,
+                    "length": end_idx - start_idx + 1,
+                }
+            )
+
+    if not endpoint_runs:
+        return None
+    if len(endpoint_runs) == 1:
+        return float(endpoint_runs[0]["midpoint_distance_km"])
+
+    selected = min(endpoint_runs, key=lambda item: float(item["midpoint_lon"]))
+    return float(selected["midpoint_distance_km"])
+
+
+def _annotate_transect_reference_labels(
+    ax,
+    transect: Transect,
+    terrain_height_m: xr.DataArray | None,
+) -> None:
+    """Annotate a small, stable set of place labels below the bottom section axis."""
+    transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+    labels: list[dict[str, object]] = []
+
+    city_ref = _select_primary_city_reference(transect)
+    if city_ref is not None:
+        labels.append(
+            {
+                "name": str(city_ref["name"]),
+                "distance_km": float(city_ref["distance_km"]),
+                "kind": "city",
+            }
+        )
+
+    mountain_ref = _select_primary_mountain_reference(transect, terrain_height_m)
+    if mountain_ref is not None:
+        labels.append(
+            {
+                "name": str(mountain_ref["name"]),
+                "distance_km": float(mountain_ref["distance_km"]),
+                "kind": "mountain",
+            }
+        )
+
+    soj_distance = _find_sea_of_japan_label_position(transect, terrain_height_m)
+    if soj_distance is not None:
+        labels.append({"name": "SOJ", "distance_km": float(soj_distance), "kind": "sea"})
+
+    if not labels:
         return
 
-    transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
     style_map = {
-        "city": {"color": "#1d4ed8", "linecolor": "#60a5fa", "y_text": -0.15},
-        "mountain": {"color": "#166534", "linecolor": "#65a30d", "y_text": -0.26},
+        "city": {"color": "#1d4ed8", "linecolor": "#60a5fa", "y_text": -0.12},
+        "sea": {"color": "#0f3d91", "linecolor": "#3b82f6", "y_text": -0.20},
+        "mountain": {"color": "#166534", "linecolor": "#65a30d", "y_text": -0.28},
     }
-    for ref in references:
-        style = style_map.get(str(ref["kind"]), style_map["city"])
-        distance_km = float(ref["distance_km"])
+    for label in sorted(labels, key=lambda item: float(item["distance_km"])):
+        style = style_map[str(label["kind"])]
+        distance_km = float(label["distance_km"])
         ax.plot(
             [distance_km, distance_km],
-            [0.0, -0.06],
+            [0.0, -0.05],
             transform=transform,
             color=str(style["linecolor"]),
-            linewidth=1.1,
+            linewidth=1.2,
             clip_on=False,
             solid_capstyle="round",
         )
         ax.text(
             distance_km,
             float(style["y_text"]),
-            str(ref["name"]),
+            str(label["name"]),
             transform=transform,
             ha="center",
             va="top",
             fontsize=8,
             color=str(style["color"]),
+            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.82, "pad": 0.6},
             clip_on=False,
         )
 
@@ -587,7 +717,7 @@ def plot_pressure_cross_section_figure(
         sharex=True,
         gridspec_kw={"height_ratios": [1.0, 1.0, 1.0]},
     )
-    fig.subplots_adjust(top=0.92, bottom=0.16, left=0.09, right=0.92, hspace=0.24)
+    fig.subplots_adjust(top=0.92, bottom=0.26, left=0.09, right=0.92, hspace=0.24)
 
     omega_fill, _ = _draw_pressure_panel(
         axes[0],
@@ -634,15 +764,16 @@ def plot_pressure_cross_section_figure(
     )
     axes[2].set_xlabel("Distance along section [km]")
 
-    for axis, fill, label in [
+    for index, (axis, fill, label) in enumerate([
         (axes[0], omega_fill, "Omega [Pa s$^{-1}$]"),
         (axes[1], moisture_fill, "q × (-omega) [1e-3 Pa s$^{-1}$]"),
         (axes[2], pv_fill, "Potential vorticity [PVU]"),
-    ]:
-        colorbar = fig.colorbar(fill, ax=axis, orientation="horizontal", pad=0.08, aspect=45)
+    ]):
+        pad = 0.08 if index < 2 else 0.16
+        colorbar = fig.colorbar(fill, ax=axis, orientation="horizontal", pad=pad, aspect=45)
         colorbar.set_label(label)
 
-    _annotate_transect_reference_labels(axes[2], transect)
+    _annotate_transect_reference_labels(axes[2], transect, terrain_height_m)
 
     fig.suptitle(
         f"Cross sections | {group_id} | {time_role} | {analysis_time:%Y-%m-%d %H:%M UTC}",
