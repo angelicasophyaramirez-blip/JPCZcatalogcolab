@@ -444,7 +444,7 @@ def _draw_pressure_panel(
         0.99,
         1.02,
         20.0,
-        "20 m s$^{-1}$ along-section wind",
+        "20 m s$^{-1}$ total along-section wind",
         coordinates="axes",
         labelpos="E",
         fontproperties={"size": 8},
@@ -510,7 +510,7 @@ def plot_pressure_cross_section_figure(
         cmap="RdBu_r",
         levels=DEFAULT_OMEGA_LEVELS_PA_S,
         colorbar_label="Omega [Pa s$^{-1}$]",
-        title="Jet-normal pressure section: omega shading, theta contours, and cross-section wind vectors",
+        title="Jet-normal pressure section: omega shading, theta contours, and total along-section wind + scaled omega vectors",
         theta_section=theta_section,
         along_wind_section=along_wind_section,
         omega_section=omega_section,
@@ -524,7 +524,7 @@ def plot_pressure_cross_section_figure(
         cmap="BrBG",
         levels=DEFAULT_MOISTURE_PROXY_LEVELS,
         colorbar_label="q × (-omega) [1e-3 Pa s$^{-1}$]",
-        title="Moist-ascent surrogate section: q × (-omega) shading with theta and vectors",
+        title="Moist-ascent surrogate section: q × (-omega) shading with theta and total along-section wind + scaled omega vectors",
         theta_section=theta_section,
         along_wind_section=along_wind_section,
         omega_section=omega_section,
@@ -538,7 +538,7 @@ def plot_pressure_cross_section_figure(
         cmap="viridis",
         levels=DEFAULT_PV_LEVELS_PVU,
         colorbar_label="Potential vorticity [PVU]",
-        title="PV-focused section: PV shading, theta contours, vectors, and 2-PVU line",
+        title="PV-focused section: PV shading, theta contours, total along-section wind + scaled omega vectors, and the 2-PVU line",
         theta_section=theta_section,
         along_wind_section=along_wind_section,
         omega_section=omega_section,
@@ -561,6 +561,15 @@ def plot_pressure_cross_section_figure(
         f"Cross sections | {group_id} | {time_role} | {analysis_time:%Y-%m-%d %H:%M UTC}",
         fontsize=13,
         y=0.98,
+    )
+    fig.text(
+        0.5,
+        0.955,
+        "Vectors show total along-section wind with scaled omega; they are not geostrophic or ageostrophic-separated.",
+        ha="center",
+        va="top",
+        fontsize=9,
+        color="#374151",
     )
     return fig
 
