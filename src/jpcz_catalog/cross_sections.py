@@ -574,6 +574,87 @@ def _rounded_levels_from_data(values: np.ndarray, *, step: float) -> np.ndarray:
     return np.arange(lower, upper + 0.5 * step, step)
 
 
+def _signed_levels_from_data(
+    values: np.ndarray,
+    *,
+    step: float,
+    min_abs_level: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    finite = np.asarray(values, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+
+    negative_levels = np.array([], dtype=float)
+    positive_levels = np.array([], dtype=float)
+    finite_min = float(np.nanmin(finite))
+    finite_max = float(np.nanmax(finite))
+
+    if finite_min <= -float(min_abs_level):
+        lower = np.floor(finite_min / step) * step
+        negative_levels = np.arange(lower, -float(min_abs_level) + 0.5 * step, step)
+    if finite_max >= float(min_abs_level):
+        upper = np.ceil(finite_max / step) * step
+        positive_levels = np.arange(float(min_abs_level), upper + 0.5 * step, step)
+    return negative_levels, positive_levels
+
+
+def _draw_signed_isotach_contours(
+    ax,
+    *,
+    x_grid: np.ndarray,
+    y_grid: np.ndarray,
+    isotach_section: xr.DataArray,
+    westerly_color: str = "#2563eb",
+    easterly_color: str = "#f97316",
+    step: float = 5.0,
+    min_abs_level: float = 5.0,
+    label_mode: str = "zonal",
+) -> None:
+    negative_levels, positive_levels = _signed_levels_from_data(
+        isotach_section.values,
+        step=float(step),
+        min_abs_level=float(min_abs_level),
+    )
+    isotach_values = np.asarray(isotach_section.values, dtype=float)
+
+    if positive_levels.size > 0:
+        westerly = ax.contour(
+            x_grid,
+            y_grid,
+            isotach_values,
+            levels=positive_levels,
+            colors=westerly_color,
+            linewidths=1.0,
+        )
+        ax.clabel(westerly, fmt="%d", fontsize=7, inline=True)
+    if negative_levels.size > 0:
+        easterly = ax.contour(
+            x_grid,
+            y_grid,
+            isotach_values,
+            levels=negative_levels,
+            colors=easterly_color,
+            linewidths=1.0,
+        )
+        ax.clabel(easterly, fmt="%d", fontsize=7, inline=True)
+
+    contour_note = "Blue: westerly zonal isotachs | Orange: easterly zonal isotachs"
+    if str(label_mode).lower() != "zonal":
+        contour_note = "Blue: positive signed isotachs | Orange: negative signed isotachs"
+    ax.text(
+        0.99,
+        0.93,
+        contour_note,
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=8,
+        color="#1f2937",
+        bbox={"facecolor": "white", "alpha": 0.78, "edgecolor": "none", "pad": 1.5},
+    )
+
+
 def _draw_pressure_panel(
     ax,
     *,
@@ -585,6 +666,7 @@ def _draw_pressure_panel(
     theta_section: xr.DataArray,
     along_wind_section: xr.DataArray,
     omega_section: xr.DataArray,
+    zonal_wind_section: xr.DataArray | None,
     terrain_pressure_hpa: xr.DataArray | None,
     terrain_height_m: xr.DataArray | None,
     theta_color: str = "#8b0000",
@@ -638,63 +720,73 @@ def _draw_pressure_panel(
                 bbox={"facecolor": "white", "alpha": 0.72, "edgecolor": "none", "pad": 1.5},
             )
 
-    point_stride = max(1, section_field.sizes["point"] // 22)
-    level_stride = max(1, section_field.sizes["level"] // 8)
-    x_sample = np.asarray(section_field["distance_km"].values, dtype=float)[::point_stride]
-    y_sample = np.asarray(section_field["level"].values, dtype=float)[::level_stride]
-    along_sample = np.asarray(along_wind_section.values, dtype=float)[::level_stride, ::point_stride]
-    omega_sample = np.asarray(omega_section.values, dtype=float)[::level_stride, ::point_stride] * OMEGA_VECTOR_SCALE
-
-    if str(wind_render_mode).lower() == "barbs":
-        ax.barbs(
-            x_sample[np.newaxis, :].repeat(len(y_sample), axis=0),
-            y_sample[:, np.newaxis].repeat(len(x_sample), axis=1),
-            along_sample,
-            omega_sample,
-            length=5.0,
-            linewidth=0.55,
-            barbcolor="black",
-            flagcolor="black",
-            alpha=0.72,
-            zorder=5,
-        )
-        ax.text(
-            0.99,
-            1.02,
-            "Wind barbs",
-            transform=ax.transAxes,
-            ha="right",
-            va="bottom",
-            fontsize=8,
-            color="#111827",
+    overlay_mode = str(wind_render_mode).lower()
+    if overlay_mode == "signed_isotachs":
+        _draw_signed_isotach_contours(
+            ax,
+            x_grid=x_grid,
+            y_grid=y_grid,
+            isotach_section=zonal_wind_section if zonal_wind_section is not None else along_wind_section,
+            label_mode="zonal" if zonal_wind_section is not None else "signed",
         )
     else:
-        q = ax.quiver(
-            x_sample,
-            y_sample,
-            along_sample,
-            omega_sample,
-            color="black",
-            angles="xy",
-            scale_units="xy",
-            scale=1.0,
-            width=0.0018,
-            headwidth=3.4,
-            headlength=4.5,
-            headaxislength=3.8,
-            alpha=0.75,
-            zorder=5,
-        )
-        ax.quiverkey(
-            q,
-            0.99,
-            1.02,
-            20.0,
-            "20 m s$^{-1}$ total along-section wind",
-            coordinates="axes",
-            labelpos="E",
-            fontproperties={"size": 8},
-        )
+        point_stride = max(1, section_field.sizes["point"] // 22)
+        level_stride = max(1, section_field.sizes["level"] // 8)
+        x_sample = np.asarray(section_field["distance_km"].values, dtype=float)[::point_stride]
+        y_sample = np.asarray(section_field["level"].values, dtype=float)[::level_stride]
+        along_sample = np.asarray(along_wind_section.values, dtype=float)[::level_stride, ::point_stride]
+        omega_sample = np.asarray(omega_section.values, dtype=float)[::level_stride, ::point_stride] * OMEGA_VECTOR_SCALE
+
+        if overlay_mode == "barbs":
+            ax.barbs(
+                x_sample[np.newaxis, :].repeat(len(y_sample), axis=0),
+                y_sample[:, np.newaxis].repeat(len(x_sample), axis=1),
+                along_sample,
+                omega_sample,
+                length=5.0,
+                linewidth=0.55,
+                barbcolor="black",
+                flagcolor="black",
+                alpha=0.72,
+                zorder=5,
+            )
+            ax.text(
+                0.99,
+                1.02,
+                "Wind barbs",
+                transform=ax.transAxes,
+                ha="right",
+                va="bottom",
+                fontsize=8,
+                color="#111827",
+            )
+        else:
+            q = ax.quiver(
+                x_sample,
+                y_sample,
+                along_sample,
+                omega_sample,
+                color="black",
+                angles="xy",
+                scale_units="xy",
+                scale=1.0,
+                width=0.0018,
+                headwidth=3.4,
+                headlength=4.5,
+                headaxislength=3.8,
+                alpha=0.75,
+                zorder=5,
+            )
+            ax.quiverkey(
+                q,
+                0.99,
+                1.02,
+                20.0,
+                "20 m s$^{-1}$ total along-section wind",
+                coordinates="axes",
+                labelpos="E",
+                fontproperties={"size": 8},
+            )
 
     if terrain_pressure_hpa is not None:
         x_distance = np.asarray(section_field["distance_km"].values, dtype=float)
@@ -740,16 +832,29 @@ def plot_pressure_cross_section_figure(
     group_id: str,
     time_role: str,
     wind_render_mode: str = "vectors",
+    zonal_wind_section: xr.DataArray | None = None,
 ) -> plt.Figure:
     """Create the stacked pressure-coordinate section figure."""
-    fig, axes = plt.subplots(
-        3,
+    fig = plt.figure(figsize=(13.2, 16.8))
+    # Reserve a dedicated row for each horizontal colorbar so the panel x-axes stay readable.
+    grid = fig.add_gridspec(
+        8,
         1,
-        figsize=(13.2, 12.8),
-        sharex=True,
-        gridspec_kw={"height_ratios": [1.0, 1.0, 1.0]},
+        height_ratios=[1.0, 0.14, 1.0, 0.14, 1.0, 0.14, 1.0, 0.18],
+        hspace=0.34,
     )
-    fig.subplots_adjust(top=0.92, bottom=0.30, left=0.09, right=0.92, hspace=0.24)
+    fig.subplots_adjust(top=0.92, bottom=0.11, left=0.09, right=0.92)
+    top_axis = fig.add_subplot(grid[0, 0])
+    middle_axis = fig.add_subplot(grid[2, 0], sharex=top_axis)
+    lower_axis = fig.add_subplot(grid[4, 0], sharex=top_axis)
+    bottom_axis = fig.add_subplot(grid[6, 0], sharex=top_axis)
+    axes = [top_axis, middle_axis, lower_axis, bottom_axis]
+    colorbar_axes = [
+        fig.add_subplot(grid[1, 0]),
+        fig.add_subplot(grid[3, 0]),
+        fig.add_subplot(grid[5, 0]),
+        fig.add_subplot(grid[7, 0]),
+    ]
 
     wind_label = "wind barbs" if str(wind_render_mode).lower() == "barbs" else "vectors"
 
@@ -763,6 +868,7 @@ def plot_pressure_cross_section_figure(
         theta_section=theta_section,
         along_wind_section=along_wind_section,
         omega_section=omega_section,
+        zonal_wind_section=zonal_wind_section,
         terrain_pressure_hpa=terrain_pressure_hpa,
         terrain_height_m=terrain_height_m,
         wind_render_mode=wind_render_mode,
@@ -778,6 +884,7 @@ def plot_pressure_cross_section_figure(
         theta_section=theta_section,
         along_wind_section=along_wind_section,
         omega_section=omega_section,
+        zonal_wind_section=zonal_wind_section,
         terrain_pressure_hpa=terrain_pressure_hpa,
         terrain_height_m=terrain_height_m,
         wind_render_mode=wind_render_mode,
@@ -793,24 +900,56 @@ def plot_pressure_cross_section_figure(
         theta_section=theta_section,
         along_wind_section=along_wind_section,
         omega_section=omega_section,
+        zonal_wind_section=zonal_wind_section,
         terrain_pressure_hpa=terrain_pressure_hpa,
         terrain_height_m=terrain_height_m,
         wind_render_mode=wind_render_mode,
         extra_contours=(pv_section, np.array([2.0]), "#f59e0b", 2.4, "2 PVU"),
         panel_extend="max",
     )
-    axes[2].set_xlabel("Distance along section [km]")
 
-    for index, (axis, fill, label) in enumerate([
-        (axes[0], omega_fill, "Omega [Pa s$^{-1}$]"),
-        (axes[1], moisture_fill, "q × (-omega) [1e-3 Pa s$^{-1}$]"),
-        (axes[2], pv_fill, "Potential vorticity [PVU]"),
-    ]):
-        pad = 0.08 if index < 2 else 0.20
-        colorbar = fig.colorbar(fill, ax=axis, orientation="horizontal", pad=pad, aspect=45)
-        colorbar.set_label(label)
+    pv_isotach_fill, _ = _draw_pressure_panel(
+        axes[3],
+        section_field=pv_section,
+        cmap="viridis",
+        levels=DEFAULT_PV_LEVELS_PVU,
+        colorbar_label="Potential vorticity [PVU]",
+        title="PV / theta / isotach section: PV shading, black theta contours, and blue westerly + orange easterly isotachs",
+        theta_section=theta_section,
+        along_wind_section=along_wind_section,
+        omega_section=omega_section,
+        zonal_wind_section=zonal_wind_section,
+        terrain_pressure_hpa=terrain_pressure_hpa,
+        terrain_height_m=terrain_height_m,
+        theta_color="#111111",
+        wind_render_mode="signed_isotachs",
+        panel_extend="max",
+    )
+    axes[-1].set_xlabel("Distance along section [km]")
 
-    _annotate_transect_reference_labels(axes[2], transect, terrain_height_m)
+    for axis in axes:
+        axis.tick_params(axis="x", which="both", bottom=True, labelbottom=True, labelsize=8, pad=2)
+
+    for colorbar_axis, fill, label in zip(
+        colorbar_axes,
+        [omega_fill, moisture_fill, pv_fill, pv_isotach_fill],
+        [
+            "Omega [Pa s$^{-1}$]",
+            "q × (-omega) [1e-3 Pa s$^{-1}$]",
+            "Potential vorticity [PVU]",
+            "Potential vorticity [PVU]",
+        ],
+        strict=True,
+    ):
+        colorbar = fig.colorbar(fill, cax=colorbar_axis, orientation="horizontal")
+        colorbar.ax.tick_params(labelsize=8, pad=1)
+        colorbar.set_label(label, fontsize=9)
+
+    for axis in axes[:-1]:
+        axis.set_xlabel("")
+
+    for axis in axes:
+        _annotate_transect_reference_labels(axis, transect, terrain_height_m)
 
     fig.suptitle(
         f"Cross sections | {group_id} | {time_role} | {analysis_time:%Y-%m-%d %H:%M UTC}",
@@ -820,7 +959,11 @@ def plot_pressure_cross_section_figure(
     fig.text(
         0.5,
         0.955,
-        f"{'Wind barbs' if str(wind_render_mode).lower() == 'barbs' else 'Vectors'} show total along-section wind with scaled omega; they are not geostrophic or ageostrophic-separated.",
+        (
+            f"{'Wind barbs' if str(wind_render_mode).lower() == 'barbs' else 'Vectors'} show the horizontal wind projected "
+            "onto the transect direction, paired with scaled omega in the upper panels; the bottom panel adds black theta "
+            "contours and signed zonal isotachs (blue westerly, orange easterly)."
+        ),
         ha="center",
         va="top",
         fontsize=9,
@@ -946,6 +1089,12 @@ def build_cross_section_diagnostics(
     moisture_proxy_3d = compute_vertical_moisture_flux_proxy_3d(pressure_volume)
     pv_3d = compute_baroclinic_potential_vorticity_3d(pressure_volume)
     along_wind_section = compute_along_transect_wind_section(pressure_volume, transect)
+    zonal_wind_section = section_from_field(
+        pressure_volume["u_component_of_wind"].astype(float).rename("zonal_wind"),
+        transect,
+    )
+    zonal_wind_section.attrs["units"] = "m s^-1"
+    zonal_wind_section.attrs["display_units"] = "m s^-1"
 
     theta_section = section_from_field(theta_3d, transect)
     theta_section = theta_section.assign_coords(distance_km=transect.distance_km)
@@ -953,6 +1102,7 @@ def build_cross_section_diagnostics(
     moisture_proxy_section = section_from_field(moisture_proxy_3d, transect).assign_coords(distance_km=transect.distance_km)
     pv_section = section_from_field(pv_3d, transect).assign_coords(distance_km=transect.distance_km)
     along_wind_section = along_wind_section.assign_coords(distance_km=transect.distance_km)
+    zonal_wind_section = zonal_wind_section.assign_coords(distance_km=transect.distance_km)
 
     terrain_height_section, terrain_pressure_section = compute_terrain_section_pressure_hpa(terrain_field, transect)
 
@@ -979,6 +1129,7 @@ def build_cross_section_diagnostics(
         "moisture_proxy_section": moisture_proxy_section,
         "pv_section": pv_section,
         "along_wind_section": along_wind_section,
+        "zonal_wind_section": zonal_wind_section,
         "terrain_height_section": terrain_height_section,
         "terrain_pressure_section": terrain_pressure_section,
         "pressure_on_theta": pressure_on_theta,
