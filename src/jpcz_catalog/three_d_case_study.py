@@ -130,6 +130,15 @@ def select_case_event(
     return match.iloc[0].copy()
 
 
+def _first_existing_value(event_row: pd.Series, names: tuple[str, ...], default=None):
+    for name in names:
+        if name in event_row.index:
+            value = event_row.get(name)
+            if pd.notna(value) and value != "":
+                return value
+    return default
+
+
 def _load_pressure_volume(
     ds: xr.Dataset,
     analysis_time: pd.Timestamp | str,
@@ -338,13 +347,26 @@ def build_case_metadata_table(event_row: pd.Series) -> pd.DataFrame:
     summary = {
         "event_peak_utc": pd.Timestamp(event_row["event_peak"]),
         "duration_hours": event_row.get("duration_hours"),
-        "default_label": event_row.get("manual_objective_label", event_row.get("cleaned_k3_label")),
-        "cleaned_label": event_row.get("cleaned_k3_label"),
+        "primary_label": _first_existing_value(
+            event_row,
+            ("manual_objective_label", "cleaned_k3_label", "monsoon_type"),
+        ),
+        "secondary_label": _first_existing_value(
+            event_row,
+            ("cleaned_k3_label", "shinoda_class"),
+        ),
         "candidate_peak_convergence_1e5_s-1": event_row.get("candidate_peak_convergence_1e5_s-1"),
         "peak_max_convergence_lat": event_row.get("peak_max_convergence_lat"),
         "peak_max_convergence_lon": event_row.get("peak_max_convergence_lon"),
-        "manual_verification_flag": event_row.get("manual_verification"),
-        "manual_notes": event_row.get("manual_notes"),
+        "verification_flag": _first_existing_value(
+            event_row,
+            ("manual_verification", "verified_event"),
+        ),
+        "verification_notes": _first_existing_value(
+            event_row,
+            ("manual_notes", "verification_notes"),
+        ),
+        "upper_level_forcing_note": event_row.get("upper_level_forcing_note"),
     }
     return pd.DataFrame({"field": list(summary), "value": list(summary.values())})
 
