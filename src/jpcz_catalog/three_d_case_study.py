@@ -471,6 +471,7 @@ def create_3d_case_figure(
     *,
     title: str | None = None,
     show_cube_frame: bool = True,
+    show_jet_volume: bool = True,
     show_moisture_sheet: bool = True,
     show_divergence_sheet: bool = True,
     show_slice_curtain: bool = True,
@@ -586,23 +587,24 @@ def create_3d_case_figure(
             )
         )
 
-    figure.add_trace(
-        go.Isosurface(
-            x=x_jet[jet_valid],
-            y=y_jet[jet_valid],
-            z=z_jet[jet_valid],
-            value=jet_values[jet_valid],
-            isomin=float(jet_isomin),
-            isomax=float(jet_isomax),
-            surface_count=max(8, int(jet_surface_count)),
-            opacity=float(jet_opacity),
-            colorscale="Blues",
-            caps={"x": {"show": False}, "y": {"show": False}, "z": {"show": False}},
-            colorbar={"title": "Wind [m s^-1]", "x": 1.02, "y": 0.82, "len": 0.30},
-            name="Upper-level jet",
-            hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>wind=%{value:.1f} m s^-1<extra></extra>",
+    if show_jet_volume:
+        figure.add_trace(
+            go.Isosurface(
+                x=x_jet[jet_valid],
+                y=y_jet[jet_valid],
+                z=z_jet[jet_valid],
+                value=jet_values[jet_valid],
+                isomin=float(jet_isomin),
+                isomax=float(jet_isomax),
+                surface_count=max(8, int(jet_surface_count)),
+                opacity=float(jet_opacity),
+                colorscale="Blues",
+                caps={"x": {"show": False}, "y": {"show": False}, "z": {"show": False}},
+                colorbar={"title": "Wind [m s^-1]", "x": 1.02, "y": 0.82, "len": 0.30},
+                name="Upper-level jet volume",
+                hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>wind=%{value:.1f} m s^-1<extra></extra>",
+            )
         )
-    )
 
     if show_jet_points:
         point_mask = jet_valid & (jet_values >= float(jet_point_threshold))
