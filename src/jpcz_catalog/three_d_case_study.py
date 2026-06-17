@@ -375,11 +375,14 @@ def create_3d_case_figure(
     case_data: ThreeDCaseStudyData,
     *,
     title: str | None = None,
+    show_cube_frame: bool = True,
     show_moisture_sheet: bool = True,
     show_divergence_sheet: bool = True,
     show_slice_curtain: bool = True,
     jet_isomin: float = 35.0,
     jet_isomax: float | None = None,
+    jet_surface_count: int = 6,
+    jet_opacity: float = 0.50,
 ) -> Any:
     """Build the rotatable Plotly figure for one event-centered case-study cube."""
     import plotly.graph_objects as go
@@ -390,6 +393,47 @@ def create_3d_case_figure(
         jet_isomax = float(np.nanmax(jet_values))
 
     figure = go.Figure()
+
+    x_min = float(np.nanmin(case_data.x_km_3d))
+    x_max = float(np.nanmax(case_data.x_km_3d))
+    y_min = float(np.nanmin(case_data.y_km_3d))
+    y_max = float(np.nanmax(case_data.y_km_3d))
+    z_min = 0.0
+    z_max = float(np.nanmax(z_values))
+
+    if show_cube_frame:
+        cube_edges = [
+            ((x_min, y_min, z_min), (x_max, y_min, z_min)),
+            ((x_min, y_max, z_min), (x_max, y_max, z_min)),
+            ((x_min, y_min, z_max), (x_max, y_min, z_max)),
+            ((x_min, y_max, z_max), (x_max, y_max, z_max)),
+            ((x_min, y_min, z_min), (x_min, y_max, z_min)),
+            ((x_max, y_min, z_min), (x_max, y_max, z_min)),
+            ((x_min, y_min, z_max), (x_min, y_max, z_max)),
+            ((x_max, y_min, z_max), (x_max, y_max, z_max)),
+            ((x_min, y_min, z_min), (x_min, y_min, z_max)),
+            ((x_max, y_min, z_min), (x_max, y_min, z_max)),
+            ((x_min, y_max, z_min), (x_min, y_max, z_max)),
+            ((x_max, y_max, z_min), (x_max, y_max, z_max)),
+        ]
+        edge_x: list[float | None] = []
+        edge_y: list[float | None] = []
+        edge_z: list[float | None] = []
+        for start_point, end_point in cube_edges:
+            edge_x.extend([float(start_point[0]), float(end_point[0]), None])
+            edge_y.extend([float(start_point[1]), float(end_point[1]), None])
+            edge_z.extend([float(start_point[2]), float(end_point[2]), None])
+        figure.add_trace(
+            go.Scatter3d(
+                x=edge_x,
+                y=edge_y,
+                z=edge_z,
+                mode="lines",
+                line={"color": "#475569", "width": 4},
+                name="Cube frame",
+                hoverinfo="skip",
+            )
+        )
 
     if case_data.terrain_m is not None and case_data.terrain_x_km is not None and case_data.terrain_y_km is not None:
         terrain_values_km = np.asarray(case_data.terrain_m.values, dtype=float) / 1000.0
@@ -403,7 +447,7 @@ def create_3d_case_figure(
                 cmin=0.0,
                 cmax=max(3000.0, float(np.nanmax(np.asarray(case_data.terrain_m.values, dtype=float)))),
                 showscale=False,
-                opacity=0.96,
+                opacity=1.0,
                 name="Terrain",
                 hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>terrain=%{surfacecolor:.0f} m<extra></extra>",
             )
@@ -417,8 +461,8 @@ def create_3d_case_figure(
             value=jet_values.ravel(),
             isomin=float(jet_isomin),
             isomax=float(jet_isomax),
-            surface_count=4,
-            opacity=0.34,
+            surface_count=int(jet_surface_count),
+            opacity=float(jet_opacity),
             colorscale="Blues",
             caps={"x": {"show": False}, "y": {"show": False}, "z": {"show": False}},
             colorbar={"title": "Wind [m s^-1]", "x": 1.02, "y": 0.82, "len": 0.30},
@@ -532,9 +576,9 @@ def create_3d_case_figure(
                 )
             )
 
-    x_extent = max(1.0, float(np.nanmax(np.abs(case_data.x_km_3d))))
-    y_extent = max(1.0, float(np.nanmax(np.abs(case_data.y_km_3d))))
-    z_extent = max(3.0, float(np.nanmax(z_values)))
+    x_extent = max(1.0, max(abs(x_min), abs(x_max)))
+    y_extent = max(1.0, max(abs(y_min), abs(y_max)))
+    z_extent = max(3.0, z_max - z_min)
     if title is None:
         title = f"3-D case-study cube | {case_data.analysis_time:%Y-%m-%d %H:%M UTC}"
 
@@ -543,9 +587,24 @@ def create_3d_case_figure(
         margin={"l": 10, "r": 10, "t": 55, "b": 10},
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.01, "xanchor": "left", "x": 0.0},
         scene={
-            "xaxis": {"title": "x [km] relative to cube center", "backgroundcolor": "#f8fafc"},
-            "yaxis": {"title": "y [km] relative to cube center", "backgroundcolor": "#f8fafc"},
-            "zaxis": {"title": "z [km ASL]", "backgroundcolor": "#f8fafc"},
+            "xaxis": {
+                "title": "x [km] relative to cube center",
+                "backgroundcolor": "#f8fafc",
+                "range": [x_min, x_max],
+                "showspikes": False,
+            },
+            "yaxis": {
+                "title": "y [km] relative to cube center",
+                "backgroundcolor": "#f8fafc",
+                "range": [y_min, y_max],
+                "showspikes": False,
+            },
+            "zaxis": {
+                "title": "z [km ASL]",
+                "backgroundcolor": "#f8fafc",
+                "range": [z_min, z_max],
+                "showspikes": False,
+            },
             "aspectmode": "manual",
             "aspectratio": {"x": x_extent / y_extent, "y": 1.0, "z": min(1.1, z_extent / y_extent * 1.8)},
             "camera": {
