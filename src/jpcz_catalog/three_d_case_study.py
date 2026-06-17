@@ -61,6 +61,10 @@ class ThreeDCaseStudyData:
     terrain_y_km: np.ndarray | None
     x_km_3d: np.ndarray
     y_km_3d: np.ndarray
+    x_km_regular_2d: np.ndarray | None
+    y_km_regular_2d: np.ndarray | None
+    z_levels_regular_km: np.ndarray | None
+    wind_speed_regular_volume: np.ndarray | None
     slice_start: tuple[float, float] | None
     slice_end: tuple[float, float] | None
     slice_x_km: np.ndarray | None
@@ -215,6 +219,50 @@ def _surface_height_km(snapshot: xr.Dataset) -> xr.DataArray:
     return height_km
 
 
+def _build_regular_height_volume(
+    wind_speed: xr.DataArray,
+    height_km: xr.DataArray,
+    x_grid_2d: np.ndarray,
+    y_grid_2d: np.ndarray,
+    *,
+    horizontal_stride: int = 2,
+    z_step_km: float = 0.25,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Interpolate wind speed from pressure surfaces onto a regular height grid."""
+    stride = max(1, int(horizontal_stride))
+    wind_values = np.asarray(wind_speed.values, dtype=float)[:, ::stride, ::stride]
+    height_values = np.asarray(height_km.values, dtype=float)[:, ::stride, ::stride]
+    x_regular = np.asarray(x_grid_2d, dtype=float)[::stride, ::stride]
+    y_regular = np.asarray(y_grid_2d, dtype=float)[::stride, ::stride]
+
+    max_height_km = float(np.nanmax(height_values))
+    z_levels_km = np.arange(0.5, max(12.0, np.ceil(max_height_km / z_step_km) * z_step_km) + 0.5 * z_step_km, z_step_km)
+    regular_volume = np.full((len(z_levels_km), wind_values.shape[1], wind_values.shape[2]), np.nan, dtype=float)
+
+    for j in range(wind_values.shape[1]):
+        for i in range(wind_values.shape[2]):
+            z_column = height_values[:, j, i]
+            wind_column = wind_values[:, j, i]
+            valid = np.isfinite(z_column) & np.isfinite(wind_column)
+            if valid.sum() < 2:
+                continue
+            z_valid = z_column[valid]
+            wind_valid = wind_column[valid]
+            sort_order = np.argsort(z_valid)
+            z_sorted = z_valid[sort_order]
+            wind_sorted = wind_valid[sort_order]
+            z_unique, unique_idx = np.unique(z_sorted, return_index=True)
+            wind_unique = wind_sorted[unique_idx]
+            if z_unique.size < 2:
+                continue
+            inside = (z_levels_km >= float(z_unique.min())) & (z_levels_km <= float(z_unique.max()))
+            if not np.any(inside):
+                continue
+            regular_volume[inside, j, i] = np.interp(z_levels_km[inside], z_unique, wind_unique)
+
+    return x_regular, y_regular, z_levels_km, regular_volume
+
+
 def build_3d_case_study_data(
     ds: xr.Dataset,
     analysis_time: pd.Timestamp | str,
@@ -253,6 +301,12 @@ def build_3d_case_study_data(
 
     geopotential_height_km = _surface_height_km(pressure_volume)
     wind_speed = compute_wind_speed_field(pressure_volume)
+    x_km_regular_2d, y_km_regular_2d, z_levels_regular_km, wind_speed_regular_volume = _build_regular_height_volume(
+        wind_speed,
+        geopotential_height_km,
+        x_grid_2d,
+        y_grid_2d,
+    )
     moisture_proxy_700 = (
         -1000.0
         * pressure_volume["specific_humidity"].sel(level=700).astype(float)
@@ -334,6 +388,10 @@ def build_3d_case_study_data(
         terrain_y_km=terrain_y_km,
         x_km_3d=x_km_3d,
         y_km_3d=y_km_3d,
+        x_km_regular_2d=x_km_regular_2d,
+        y_km_regular_2d=y_km_regular_2d,
+        z_levels_regular_km=z_levels_regular_km,
+        wind_speed_regular_volume=wind_speed_regular_volume,
         slice_start=slice_start,
         slice_end=slice_end,
         slice_x_km=slice_x_km,
@@ -382,6 +440,8 @@ def build_case_runtime_diagnostics(case_data: ThreeDCaseStudyData) -> pd.DataFra
         f"{int(level)} hPa: {float(case_data.wind_speed.sel(level=level).max().values):.1f} m s^-1"
         for level in level_values
     ]
+    regular_volume = case_data.wind_speed_regular_volume
+    regular_volume_max = float(np.nanmax(regular_volume)) if regular_volume is not None else np.nan
     terrain_loaded = case_data.terrain_m is not None
     terrain_max_m = (
         float(np.nanmax(np.asarray(case_data.terrain_m.values, dtype=float)))
@@ -401,6 +461,7 @@ def build_case_runtime_diagnostics(case_data: ThreeDCaseStudyData) -> pd.DataFra
         "z_min_km": z_min_km,
         "z_max_km": z_max_km,
         "wind_max_by_level": " | ".join(wind_max_by_level),
+        "regular_volume_max_wind": regular_volume_max,
     }
     return pd.DataFrame({"field": list(summary), "value": list(summary.values())})
 
@@ -418,7 +479,7 @@ def create_3d_case_figure(
     jet_surface_count: int = 6,
     jet_opacity: float = 0.50,
     jet_top_pressure_hpa: int = 400,
-    show_jet_points: bool = True,
+    show_jet_points: bool = False,
     jet_point_threshold: float = 20.0,
     jet_point_size: float = 3.0,
     max_jet_points: int = 5000,
@@ -427,22 +488,42 @@ def create_3d_case_figure(
     """Build the rotatable Plotly figure for one event-centered case-study cube."""
     import plotly.graph_objects as go
 
-    full_jet_values = np.asarray(case_data.wind_speed.values, dtype=float)
     z_values = np.asarray(case_data.geopotential_height_km.values, dtype=float)
-    level_values = np.asarray(case_data.wind_speed["level"].values, dtype=float)
-    jet_level_mask = level_values <= float(jet_top_pressure_hpa)
-    if np.any(jet_level_mask):
-        jet_values = full_jet_values[jet_level_mask, :, :]
-        z_jet = z_values[jet_level_mask, :, :]
-        x_jet = case_data.x_km_3d[jet_level_mask, :, :]
-        y_jet = case_data.y_km_3d[jet_level_mask, :, :]
+    full_jet_values = np.asarray(case_data.wind_speed.values, dtype=float)
+
+    if (
+        case_data.wind_speed_regular_volume is not None
+        and case_data.z_levels_regular_km is not None
+        and case_data.x_km_regular_2d is not None
+        and case_data.y_km_regular_2d is not None
+    ):
+        regular_z = np.asarray(case_data.z_levels_regular_km, dtype=float)
+        jet_height_floor = float(np.nanmin(np.asarray(case_data.geopotential_height_km.sel(level=int(jet_top_pressure_hpa)).values, dtype=float)))
+        jet_height_mask = regular_z >= jet_height_floor
+        if np.any(jet_height_mask):
+            jet_values = np.asarray(case_data.wind_speed_regular_volume, dtype=float)[jet_height_mask, :, :]
+            z_jet = np.broadcast_to(regular_z[jet_height_mask][:, np.newaxis, np.newaxis], jet_values.shape)
+        else:
+            jet_values = np.asarray(case_data.wind_speed_regular_volume, dtype=float)
+            z_jet = np.broadcast_to(regular_z[:, np.newaxis, np.newaxis], jet_values.shape)
+        x_jet = np.broadcast_to(np.asarray(case_data.x_km_regular_2d, dtype=float), jet_values.shape)
+        y_jet = np.broadcast_to(np.asarray(case_data.y_km_regular_2d, dtype=float), jet_values.shape)
     else:
-        jet_values = full_jet_values
-        z_jet = z_values
-        x_jet = case_data.x_km_3d
-        y_jet = case_data.y_km_3d
+        level_values = np.asarray(case_data.wind_speed["level"].values, dtype=float)
+        jet_level_mask = level_values <= float(jet_top_pressure_hpa)
+        if np.any(jet_level_mask):
+            jet_values = full_jet_values[jet_level_mask, :, :]
+            z_jet = z_values[jet_level_mask, :, :]
+            x_jet = case_data.x_km_3d[jet_level_mask, :, :]
+            y_jet = case_data.y_km_3d[jet_level_mask, :, :]
+        else:
+            jet_values = full_jet_values
+            z_jet = z_values
+            x_jet = case_data.x_km_3d
+            y_jet = case_data.y_km_3d
     if jet_isomax is None:
         jet_isomax = float(np.nanmax(jet_values))
+    jet_valid = np.isfinite(jet_values) & np.isfinite(z_jet) & np.isfinite(x_jet) & np.isfinite(y_jet)
 
     figure = go.Figure()
 
@@ -507,13 +588,13 @@ def create_3d_case_figure(
 
     figure.add_trace(
         go.Isosurface(
-            x=x_jet.ravel(),
-            y=y_jet.ravel(),
-            z=z_jet.ravel(),
-            value=jet_values.ravel(),
+            x=x_jet[jet_valid],
+            y=y_jet[jet_valid],
+            z=z_jet[jet_valid],
+            value=jet_values[jet_valid],
             isomin=float(jet_isomin),
             isomax=float(jet_isomax),
-            surface_count=int(jet_surface_count),
+            surface_count=max(8, int(jet_surface_count)),
             opacity=float(jet_opacity),
             colorscale="Blues",
             caps={"x": {"show": False}, "y": {"show": False}, "z": {"show": False}},
@@ -524,7 +605,7 @@ def create_3d_case_figure(
     )
 
     if show_jet_points:
-        point_mask = np.isfinite(jet_values) & np.isfinite(z_jet) & (jet_values >= float(jet_point_threshold))
+        point_mask = jet_valid & (jet_values >= float(jet_point_threshold))
         if np.any(point_mask):
             point_x = x_jet[point_mask]
             point_y = y_jet[point_mask]
