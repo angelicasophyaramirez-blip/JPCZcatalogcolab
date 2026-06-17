@@ -859,6 +859,40 @@ def _annotate_section_endpoint_banner(
     )
 
 
+def _annotate_section_axis_endpoints(
+    ax,
+    transect: Transect,
+    *,
+    y_offset: float = -0.18,
+) -> None:
+    x_values = np.asarray(transect.distance_km.values, dtype=float)
+    if x_values.size == 0:
+        return
+    transform = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+    ax.text(
+        float(x_values[0]),
+        y_offset,
+        "Start",
+        transform=transform,
+        ha="left",
+        va="top",
+        fontsize=8.5,
+        fontweight="bold",
+        color="#166534",
+    )
+    ax.text(
+        float(x_values[-1]),
+        y_offset,
+        "End",
+        transform=transform,
+        ha="right",
+        va="top",
+        fontsize=8.5,
+        fontweight="bold",
+        color="#991b1b",
+    )
+
+
 def plot_pressure_cross_section_figure(
     *,
     transect: Transect,
@@ -967,6 +1001,7 @@ def plot_pressure_cross_section_figure(
         panel_extend="max",
     )
     axes[-1].set_xlabel("Distance along section [km]")
+    _annotate_section_axis_endpoints(axes[-1], transect, y_offset=-0.16)
 
     for axis in axes:
         axis.tick_params(axis="x", which="both", bottom=True, labelbottom=True, labelsize=8, pad=2)
@@ -1075,6 +1110,7 @@ def plot_isentropic_cross_section_figure(
         colorbar.set_label(cbar_label)
 
     axes[1].set_xlabel("Distance along section [km]")
+    _annotate_section_axis_endpoints(axes[1], transect, y_offset=-0.16)
     fig.suptitle(
         f"Isentropic section | {group_id} | {time_role} | {analysis_time:%Y-%m-%d %H:%M UTC}",
         fontsize=13,
