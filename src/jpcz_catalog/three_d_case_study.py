@@ -575,6 +575,11 @@ def create_3d_case_figure(
     show_jet_points: bool = False,
     jet_point_threshold: float = 20.0,
     jet_point_size: float = 3.0,
+    jet_point_opacity: float = 0.78,
+    jet_point_colorscale: str = "Turbo",
+    jet_point_single_color: str | None = None,
+    jet_point_showscale: bool = True,
+    jet_point_colorbar_title: str = "Jet points [m s^-1]",
     max_jet_points: int = 5000,
     relative_humidity_min: float = 0.82,
     relative_humidity_max: float = 1.00,
@@ -734,15 +739,28 @@ def create_3d_case_figure(
                     y=point_y,
                     z=point_z,
                     mode="markers",
-                    marker={
-                        "size": float(jet_point_size),
-                        "color": point_wind,
-                        "colorscale": "Turbo",
-                        "opacity": 0.78,
-                        "colorbar": {"title": "Jet points [m s^-1]", "x": 1.02, "y": 0.82, "len": 0.18},
-                    },
+                    marker=(
+                        {
+                            "size": float(jet_point_size),
+                            "color": jet_point_single_color,
+                            "opacity": float(jet_point_opacity),
+                        }
+                        if jet_point_single_color is not None
+                        else {
+                            "size": float(jet_point_size),
+                            "color": point_wind,
+                            "colorscale": jet_point_colorscale,
+                            "opacity": float(jet_point_opacity),
+                            "showscale": bool(jet_point_showscale),
+                            "colorbar": {"title": jet_point_colorbar_title, "x": 1.02, "y": 0.82, "len": 0.18},
+                        }
+                    ),
                     name="Jet core points",
-                    hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>wind=%{marker.color:.1f} m s^-1<extra></extra>",
+                    hovertemplate=(
+                        "x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<extra></extra>"
+                        if jet_point_single_color is not None
+                        else "x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>wind=%{marker.color:.1f} m s^-1<extra></extra>"
+                    ),
                 )
             )
 
