@@ -30,10 +30,14 @@ DEFAULT_3D_PRESSURE_LEVELS_HPA: tuple[int, ...] = (
     850,
     700,
     600,
+    550,
     500,
+    450,
     400,
+    350,
     300,
     250,
+    225,
     200,
 )
 
@@ -414,6 +418,10 @@ def create_3d_case_figure(
     jet_surface_count: int = 6,
     jet_opacity: float = 0.50,
     jet_top_pressure_hpa: int = 400,
+    show_jet_points: bool = True,
+    jet_point_threshold: float = 20.0,
+    jet_point_size: float = 3.0,
+    max_jet_points: int = 5000,
     vertical_exaggeration: float = 28.0,
 ) -> Any:
     """Build the rotatable Plotly figure for one event-centered case-study cube."""
@@ -514,6 +522,37 @@ def create_3d_case_figure(
             hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>wind=%{value:.1f} m s^-1<extra></extra>",
         )
     )
+
+    if show_jet_points:
+        point_mask = np.isfinite(jet_values) & np.isfinite(z_jet) & (jet_values >= float(jet_point_threshold))
+        if np.any(point_mask):
+            point_x = x_jet[point_mask]
+            point_y = y_jet[point_mask]
+            point_z = z_jet[point_mask]
+            point_wind = jet_values[point_mask]
+            if point_wind.size > int(max_jet_points):
+                selection = np.linspace(0, point_wind.size - 1, int(max_jet_points), dtype=int)
+                point_x = point_x[selection]
+                point_y = point_y[selection]
+                point_z = point_z[selection]
+                point_wind = point_wind[selection]
+            figure.add_trace(
+                go.Scatter3d(
+                    x=point_x,
+                    y=point_y,
+                    z=point_z,
+                    mode="markers",
+                    marker={
+                        "size": float(jet_point_size),
+                        "color": point_wind,
+                        "colorscale": "Turbo",
+                        "opacity": 0.78,
+                        "colorbar": {"title": "Jet points [m s^-1]", "x": 1.02, "y": 0.60, "len": 0.20},
+                    },
+                    name="Jet core points",
+                    hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>wind=%{marker.color:.1f} m s^-1<extra></extra>",
+                )
+            )
 
     if show_moisture_sheet:
         height_700 = np.asarray(case_data.geopotential_height_km.sel(level=700).values, dtype=float)
