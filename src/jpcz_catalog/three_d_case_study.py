@@ -371,6 +371,36 @@ def build_case_metadata_table(event_row: pd.Series) -> pd.DataFrame:
     return pd.DataFrame({"field": list(summary), "value": list(summary.values())})
 
 
+def build_case_runtime_diagnostics(case_data: ThreeDCaseStudyData) -> pd.DataFrame:
+    """Summarize what the 3-D runtime actually loaded."""
+    level_values = np.asarray(case_data.pressure_volume["level"].values, dtype=float)
+    wind_max_by_level = [
+        f"{int(level)} hPa: {float(case_data.wind_speed.sel(level=level).max().values):.1f} m s^-1"
+        for level in level_values
+    ]
+    terrain_loaded = case_data.terrain_m is not None
+    terrain_max_m = (
+        float(np.nanmax(np.asarray(case_data.terrain_m.values, dtype=float)))
+        if terrain_loaded
+        else np.nan
+    )
+    z_min_km = float(np.nanmin(np.asarray(case_data.geopotential_height_km.values, dtype=float)))
+    z_max_km = float(np.nanmax(np.asarray(case_data.geopotential_height_km.values, dtype=float)))
+
+    summary = {
+        "analysis_time_utc": case_data.analysis_time,
+        "cube_lon_range": f"{case_data.domain.lon_min:.1f} to {case_data.domain.lon_max:.1f}",
+        "cube_lat_range": f"{case_data.domain.lat_min:.1f} to {case_data.domain.lat_max:.1f}",
+        "levels_hpa": ", ".join(str(int(level)) for level in level_values),
+        "terrain_loaded": terrain_loaded,
+        "terrain_max_m": terrain_max_m,
+        "z_min_km": z_min_km,
+        "z_max_km": z_max_km,
+        "wind_max_by_level": " | ".join(wind_max_by_level),
+    }
+    return pd.DataFrame({"field": list(summary), "value": list(summary.values())})
+
+
 def create_3d_case_figure(
     case_data: ThreeDCaseStudyData,
     *,
@@ -379,16 +409,30 @@ def create_3d_case_figure(
     show_moisture_sheet: bool = True,
     show_divergence_sheet: bool = True,
     show_slice_curtain: bool = True,
-    jet_isomin: float = 35.0,
+    jet_isomin: float = 25.0,
     jet_isomax: float | None = None,
     jet_surface_count: int = 6,
     jet_opacity: float = 0.50,
+    jet_top_pressure_hpa: int = 400,
+    vertical_exaggeration: float = 28.0,
 ) -> Any:
     """Build the rotatable Plotly figure for one event-centered case-study cube."""
     import plotly.graph_objects as go
 
-    jet_values = np.asarray(case_data.wind_speed.values, dtype=float)
+    full_jet_values = np.asarray(case_data.wind_speed.values, dtype=float)
     z_values = np.asarray(case_data.geopotential_height_km.values, dtype=float)
+    level_values = np.asarray(case_data.wind_speed["level"].values, dtype=float)
+    jet_level_mask = level_values <= float(jet_top_pressure_hpa)
+    if np.any(jet_level_mask):
+        jet_values = full_jet_values[jet_level_mask, :, :]
+        z_jet = z_values[jet_level_mask, :, :]
+        x_jet = case_data.x_km_3d[jet_level_mask, :, :]
+        y_jet = case_data.y_km_3d[jet_level_mask, :, :]
+    else:
+        jet_values = full_jet_values
+        z_jet = z_values
+        x_jet = case_data.x_km_3d
+        y_jet = case_data.y_km_3d
     if jet_isomax is None:
         jet_isomax = float(np.nanmax(jet_values))
 
@@ -455,9 +499,9 @@ def create_3d_case_figure(
 
     figure.add_trace(
         go.Isosurface(
-            x=case_data.x_km_3d.ravel(),
-            y=case_data.y_km_3d.ravel(),
-            z=z_values.ravel(),
+            x=x_jet.ravel(),
+            y=y_jet.ravel(),
+            z=z_jet.ravel(),
             value=jet_values.ravel(),
             isomin=float(jet_isomin),
             isomax=float(jet_isomax),
@@ -582,6 +626,7 @@ def create_3d_case_figure(
     if title is None:
         title = f"3-D case-study cube | {case_data.analysis_time:%Y-%m-%d %H:%M UTC}"
 
+    z_aspect = min(2.5, max(0.55, float(vertical_exaggeration) * z_extent / max(y_extent, 1.0)))
     figure.update_layout(
         title=title,
         margin={"l": 10, "r": 10, "t": 55, "b": 10},
@@ -606,7 +651,7 @@ def create_3d_case_figure(
                 "showspikes": False,
             },
             "aspectmode": "manual",
-            "aspectratio": {"x": x_extent / y_extent, "y": 1.0, "z": min(1.1, z_extent / y_extent * 1.8)},
+            "aspectratio": {"x": max(1.0, x_extent / y_extent), "y": 1.0, "z": z_aspect},
             "camera": {
                 "eye": {"x": 1.55, "y": -1.85, "z": 0.95},
                 "up": {"x": 0.0, "y": 0.0, "z": 1.0},
