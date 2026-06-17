@@ -54,6 +54,7 @@ class ThreeDCaseStudyData:
     pressure_volume: xr.Dataset
     geopotential_height_km: xr.DataArray
     wind_speed: xr.DataArray
+    relative_humidity_volume: xr.DataArray
     moisture_proxy_volume: xr.DataArray
     moisture_proxy_700: xr.DataArray
     divergence_925_display: xr.DataArray
@@ -66,7 +67,9 @@ class ThreeDCaseStudyData:
     y_km_regular_2d: np.ndarray | None
     z_levels_regular_km: np.ndarray | None
     wind_speed_regular_volume: np.ndarray | None
+    relative_humidity_regular_volume: np.ndarray | None
     moisture_proxy_regular_volume: np.ndarray | None
+    omega_regular_volume: np.ndarray | None
     slice_start: tuple[float, float] | None
     slice_end: tuple[float, float] | None
     slice_x_km: np.ndarray | None
@@ -221,6 +224,46 @@ def _surface_height_km(snapshot: xr.Dataset) -> xr.DataArray:
     return height_km
 
 
+def _compute_relative_humidity_volume(snapshot: xr.Dataset) -> xr.DataArray:
+    """Approximate relative humidity from pressure, temperature, and specific humidity."""
+    temperature_k = snapshot["temperature"].astype(float)
+    specific_humidity = snapshot["specific_humidity"].astype(float)
+    pressure_pa = (
+        xr.DataArray(
+            np.asarray(snapshot["level"].values, dtype=float) * 100.0,
+            coords={"level": snapshot["level"]},
+            dims=("level",),
+        )
+        .broadcast_like(temperature_k)
+        .astype(float)
+    )
+    temperature_c = temperature_k - 273.15
+    saturation_vapor_pressure_pa = 611.2 * np.exp((17.67 * temperature_c) / (temperature_c + 243.5))
+    vapor_pressure_pa = (specific_humidity * pressure_pa) / (0.622 + 0.378 * specific_humidity)
+    relative_humidity = (vapor_pressure_pa / saturation_vapor_pressure_pa).clip(min=0.0, max=1.2).rename("relative_humidity")
+    relative_humidity.attrs["units"] = "fraction"
+    relative_humidity.attrs["display_units"] = "%"
+    return relative_humidity
+
+
+def _smooth_section(
+    section: xr.DataArray,
+    *,
+    vertical_window: int = 3,
+    horizontal_window: int = 7,
+) -> xr.DataArray:
+    """Lightly smooth a 2-D section field for a more readable curtain."""
+    if section.ndim != 2:
+        return section
+    vertical_dim, horizontal_dim = section.dims[0], section.dims[1]
+    smoothed = section
+    if int(vertical_window) > 1:
+        smoothed = smoothed.rolling({vertical_dim: int(vertical_window)}, center=True, min_periods=1).mean()
+    if int(horizontal_window) > 1:
+        smoothed = smoothed.rolling({horizontal_dim: int(horizontal_window)}, center=True, min_periods=1).mean()
+    return smoothed
+
+
 def _build_regular_height_volume(
     field: xr.DataArray,
     height_km: xr.DataArray,
@@ -285,6 +328,7 @@ def build_3d_case_study_data(
             "u_component_of_wind",
             "v_component_of_wind",
             "geopotential",
+            "temperature",
             "vertical_velocity",
             "specific_humidity",
         ),
@@ -309,6 +353,13 @@ def build_3d_case_study_data(
         x_grid_2d,
         y_grid_2d,
     )
+    relative_humidity_volume = _compute_relative_humidity_volume(pressure_volume)
+    _, _, _, relative_humidity_regular_volume = _build_regular_height_volume(
+        relative_humidity_volume,
+        geopotential_height_km,
+        x_grid_2d,
+        y_grid_2d,
+    )
     moisture_proxy_volume = (
         -1000.0
         * pressure_volume["specific_humidity"].astype(float)
@@ -319,6 +370,12 @@ def build_3d_case_study_data(
     moisture_proxy_700.attrs["units"] = "1e-3 Pa s^-1"
     _, _, _, moisture_proxy_regular_volume = _build_regular_height_volume(
         moisture_proxy_volume,
+        geopotential_height_km,
+        x_grid_2d,
+        y_grid_2d,
+    )
+    _, _, _, omega_regular_volume = _build_regular_height_volume(
+        pressure_volume["vertical_velocity"].astype(float).rename("omega"),
         geopotential_height_km,
         x_grid_2d,
         y_grid_2d,
@@ -391,6 +448,7 @@ def build_3d_case_study_data(
         pressure_volume=pressure_volume,
         geopotential_height_km=geopotential_height_km,
         wind_speed=wind_speed,
+        relative_humidity_volume=relative_humidity_volume,
         moisture_proxy_volume=moisture_proxy_volume,
         moisture_proxy_700=moisture_proxy_700,
         divergence_925_display=divergence_925_display,
@@ -403,7 +461,9 @@ def build_3d_case_study_data(
         y_km_regular_2d=y_km_regular_2d,
         z_levels_regular_km=z_levels_regular_km,
         wind_speed_regular_volume=wind_speed_regular_volume,
+        relative_humidity_regular_volume=relative_humidity_regular_volume,
         moisture_proxy_regular_volume=moisture_proxy_regular_volume,
+        omega_regular_volume=omega_regular_volume,
         slice_start=slice_start,
         slice_end=slice_end,
         slice_x_km=slice_x_km,
@@ -452,6 +512,10 @@ def build_case_runtime_diagnostics(case_data: ThreeDCaseStudyData) -> pd.DataFra
         f"{int(level)} hPa: {float(case_data.wind_speed.sel(level=level).max().values):.1f} m s^-1"
         for level in level_values
     ]
+    relative_humidity_max_by_level = [
+        f"{int(level)} hPa: {100.0 * float(case_data.relative_humidity_volume.sel(level=level).max().values):.0f}%"
+        for level in level_values
+    ]
     moisture_max_by_level = [
         f"{int(level)} hPa: {float(case_data.moisture_proxy_volume.sel(level=level).max().values):.2f}"
         for level in level_values
@@ -482,6 +546,7 @@ def build_case_runtime_diagnostics(case_data: ThreeDCaseStudyData) -> pd.DataFra
         "z_min_km": z_min_km,
         "z_max_km": z_max_km,
         "wind_max_by_level": " | ".join(wind_max_by_level),
+        "relative_humidity_max_by_level": " | ".join(relative_humidity_max_by_level),
         "moisture_proxy_max_by_level": " | ".join(moisture_max_by_level),
         "omega_extrema_by_level": " | ".join(omega_extrema_by_level),
         "regular_volume_max_wind": regular_volume_max,
@@ -501,6 +566,7 @@ def create_3d_case_figure(
     show_moisture_volume: bool = False,
     show_ascent_descent_points: bool = False,
     show_convergence_floor: bool = False,
+    moisture_volume_mode: str = "relative_humidity",
     jet_isomin: float = 25.0,
     jet_isomax: float | None = None,
     jet_surface_count: int = 6,
@@ -510,6 +576,9 @@ def create_3d_case_figure(
     jet_point_threshold: float = 20.0,
     jet_point_size: float = 3.0,
     max_jet_points: int = 5000,
+    relative_humidity_min: float = 0.82,
+    relative_humidity_max: float = 1.00,
+    require_ascent_for_rh_volume: bool = True,
     moisture_isomin: float | None = None,
     moisture_isomax: float | None = None,
     moisture_surface_count: int = 4,
@@ -520,6 +589,10 @@ def create_3d_case_figure(
     max_omega_points: int = 1800,
     convergence_quantile: float = 0.82,
     convergence_opacity: float = 0.60,
+    slice_omega_smoothing_levels: int = 3,
+    slice_omega_smoothing_points: int = 7,
+    slice_omega_max_abs: float | None = None,
+    slice_omega_opacity: float = 0.52,
     vertical_exaggeration: float = 28.0,
 ) -> Any:
     """Build the rotatable Plotly figure for one event-centered case-study cube."""
@@ -666,7 +739,7 @@ def create_3d_case_figure(
                         "color": point_wind,
                         "colorscale": "Turbo",
                         "opacity": 0.78,
-                        "colorbar": {"title": "Jet points [m s^-1]", "x": 1.02, "y": 0.60, "len": 0.20},
+                        "colorbar": {"title": "Jet points [m s^-1]", "x": 1.02, "y": 0.82, "len": 0.18},
                     },
                     name="Jet core points",
                     hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>wind=%{marker.color:.1f} m s^-1<extra></extra>",
@@ -675,19 +748,17 @@ def create_3d_case_figure(
 
     if (
         show_moisture_volume
-        and case_data.moisture_proxy_regular_volume is not None
         and case_data.z_levels_regular_km is not None
         and case_data.x_km_regular_2d is not None
         and case_data.y_km_regular_2d is not None
     ):
-        moisture_values = np.asarray(case_data.moisture_proxy_regular_volume, dtype=float)
-        moisture_valid = np.isfinite(moisture_values) & (moisture_values > 0.0)
-        if np.any(moisture_valid):
-            if moisture_isomin is None:
-                moisture_isomin = float(np.nanquantile(moisture_values[moisture_valid], float(moisture_quantile)))
-            if moisture_isomax is None:
-                moisture_isomax = float(np.nanmax(moisture_values[moisture_valid]))
-            if float(moisture_isomax) > float(moisture_isomin):
+        if moisture_volume_mode == "relative_humidity" and case_data.relative_humidity_regular_volume is not None:
+            moisture_values = np.asarray(case_data.relative_humidity_regular_volume, dtype=float)
+            moisture_valid = np.isfinite(moisture_values)
+            if require_ascent_for_rh_volume and case_data.omega_regular_volume is not None:
+                moisture_valid &= np.asarray(case_data.omega_regular_volume, dtype=float) < 0.0
+            moisture_valid &= moisture_values >= float(relative_humidity_min)
+            if np.any(moisture_valid) and float(relative_humidity_max) > float(relative_humidity_min):
                 x_moisture = np.broadcast_to(np.asarray(case_data.x_km_regular_2d, dtype=float), moisture_values.shape)
                 y_moisture = np.broadcast_to(np.asarray(case_data.y_km_regular_2d, dtype=float), moisture_values.shape)
                 z_moisture = np.broadcast_to(
@@ -700,22 +771,59 @@ def create_3d_case_figure(
                         y=y_moisture[moisture_valid],
                         z=z_moisture[moisture_valid],
                         value=moisture_values[moisture_valid],
-                        isomin=float(moisture_isomin),
-                        isomax=float(moisture_isomax),
-                        surface_count=max(3, int(moisture_surface_count)),
+                        isomin=float(relative_humidity_min),
+                        isomax=float(relative_humidity_max),
+                        surface_count=max(2, int(moisture_surface_count)),
                         opacity=float(moisture_opacity),
                         colorscale=[
-                            [0.0, "#d9f99d"],
-                            [0.35, "#86efac"],
-                            [0.70, "#22c55e"],
-                            [1.0, "#166534"],
+                            [0.0, "#ccfbf1"],
+                            [0.35, "#99f6e4"],
+                            [0.70, "#2dd4bf"],
+                            [1.0, "#0f766e"],
                         ],
                         caps={"x": {"show": False}, "y": {"show": False}, "z": {"show": False}},
-                        colorbar={"title": "Moist-ascent proxy", "x": 1.02, "y": 0.50, "len": 0.18},
-                        name="Moist-ascent proxy volume",
-                        hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>q x (-omega)=%{value:.2f}<extra></extra>",
+                        colorbar={"title": "RH fraction", "x": 1.02, "y": 0.56, "len": 0.16},
+                        name="Humid ascent volume",
+                        hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>RH=%{value:.2f}<extra></extra>",
                     )
                 )
+        elif case_data.moisture_proxy_regular_volume is not None:
+            moisture_values = np.asarray(case_data.moisture_proxy_regular_volume, dtype=float)
+            moisture_valid = np.isfinite(moisture_values) & (moisture_values > 0.0)
+            if np.any(moisture_valid):
+                if moisture_isomin is None:
+                    moisture_isomin = float(np.nanquantile(moisture_values[moisture_valid], float(moisture_quantile)))
+                if moisture_isomax is None:
+                    moisture_isomax = float(np.nanmax(moisture_values[moisture_valid]))
+                if float(moisture_isomax) > float(moisture_isomin):
+                    x_moisture = np.broadcast_to(np.asarray(case_data.x_km_regular_2d, dtype=float), moisture_values.shape)
+                    y_moisture = np.broadcast_to(np.asarray(case_data.y_km_regular_2d, dtype=float), moisture_values.shape)
+                    z_moisture = np.broadcast_to(
+                        np.asarray(case_data.z_levels_regular_km, dtype=float)[:, np.newaxis, np.newaxis],
+                        moisture_values.shape,
+                    )
+                    figure.add_trace(
+                        go.Isosurface(
+                            x=x_moisture[moisture_valid],
+                            y=y_moisture[moisture_valid],
+                            z=z_moisture[moisture_valid],
+                            value=moisture_values[moisture_valid],
+                            isomin=float(moisture_isomin),
+                            isomax=float(moisture_isomax),
+                            surface_count=max(3, int(moisture_surface_count)),
+                            opacity=float(moisture_opacity),
+                            colorscale=[
+                                [0.0, "#d9f99d"],
+                                [0.35, "#86efac"],
+                                [0.70, "#22c55e"],
+                                [1.0, "#166534"],
+                            ],
+                            caps={"x": {"show": False}, "y": {"show": False}, "z": {"show": False}},
+                            colorbar={"title": "Moist-ascent proxy", "x": 1.02, "y": 0.56, "len": 0.16},
+                            name="Moist-ascent proxy volume",
+                            hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>q x (-omega)=%{value:.2f}<extra></extra>",
+                        )
+                    )
 
     if show_ascent_descent_points:
         omega_values = np.asarray(case_data.pressure_volume["vertical_velocity"].values, dtype=float)
@@ -828,7 +936,7 @@ def create_3d_case_figure(
                     cmax=float(np.nanmax(convergence_magnitude)),
                     opacity=float(convergence_opacity),
                     showscale=True,
-                    colorbar={"title": "925 hPa convergence", "x": 1.02, "y": 0.28, "len": 0.18},
+                    colorbar={"title": "925 hPa convergence", "x": 1.02, "y": 0.14, "len": 0.16},
                     name="Strong low-level convergence",
                     hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>convergence=%{surfacecolor:.2f} [1e-5 s^-1]<extra></extra>",
                 )
@@ -860,18 +968,30 @@ def create_3d_case_figure(
         and case_data.slice_z_km is not None
         and case_data.slice_omega is not None
     ):
+        smoothed_slice_omega = _smooth_section(
+            case_data.slice_omega.astype(float),
+            vertical_window=int(slice_omega_smoothing_levels),
+            horizontal_window=int(slice_omega_smoothing_points),
+        )
+        slice_omega_values = np.asarray(smoothed_slice_omega.values, dtype=float)
+        finite_slice = np.isfinite(slice_omega_values)
+        curtain_max_abs = float(slice_omega_max_abs) if slice_omega_max_abs is not None else (
+            float(np.nanquantile(np.abs(slice_omega_values[finite_slice]), 0.97)) if np.any(finite_slice) else 0.4
+        )
+        curtain_max_abs = max(0.1, curtain_max_abs)
         figure.add_trace(
             go.Surface(
                 x=case_data.slice_x_km,
                 y=case_data.slice_y_km,
                 z=np.asarray(case_data.slice_z_km.values, dtype=float),
-                surfacecolor=np.asarray(case_data.slice_omega.values, dtype=float),
+                surfacecolor=slice_omega_values,
                 colorscale="RdBu_r",
-                cmin=-0.8,
-                cmax=0.8,
-                opacity=0.42,
-                showscale=False,
-                name="Slice curtain (omega)",
+                cmin=-curtain_max_abs,
+                cmax=curtain_max_abs,
+                opacity=float(slice_omega_opacity),
+                showscale=True,
+                colorbar={"title": "Smoothed omega", "x": 1.02, "y": 0.36, "len": 0.16},
+                name="Smoothed omega curtain",
                 hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>omega=%{surfacecolor:.2f} Pa s^-1<extra></extra>",
             )
         )
