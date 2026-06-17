@@ -96,6 +96,34 @@ def compute_relative_vorticity_field(
     )
 
 
+def compute_vorticity_advection_field(
+    snapshot: xr.Dataset,
+    *,
+    u_name: str = "u_component_of_wind",
+    v_name: str = "v_component_of_wind",
+    dx=None,
+    dy=None,
+) -> xr.DataArray:
+    """Compute horizontal advection of absolute vorticity for one analysis snapshot."""
+    if dx is None or dy is None:
+        dx, dy = compute_grid_deltas(snapshot.longitude, snapshot.latitude)
+
+    u = snapshot[u_name].values * units("m/s")
+    v = snapshot[v_name].values * units("m/s")
+    relative_vorticity = mpcalc.vorticity(u, v, dx=dx, dy=dy)
+    coriolis_1d = mpcalc.coriolis_parameter(snapshot.latitude.values * units.degrees).to("s^-1")
+    absolute_vorticity = relative_vorticity + coriolis_1d[:, np.newaxis]
+    vorticity_advection = mpcalc.advection(absolute_vorticity, u=u, v=v, dx=dx, dy=dy).m
+
+    return xr.DataArray(
+        vorticity_advection,
+        coords={"latitude": snapshot.latitude, "longitude": snapshot.longitude},
+        dims=("latitude", "longitude"),
+        name="absolute_vorticity_advection",
+        attrs={"units": "s^-2", "display_units": "1e-9 s^-2"},
+    )
+
+
 def compute_temperature_gradient_magnitude(
     snapshot: xr.Dataset,
     *,
