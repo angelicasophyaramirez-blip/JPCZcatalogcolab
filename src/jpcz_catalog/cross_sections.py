@@ -818,6 +818,47 @@ def _draw_pressure_panel(
     return fill, theta_contours
 
 
+def _format_coordinate(value: float, positive_suffix: str, negative_suffix: str) -> str:
+    suffix = positive_suffix if float(value) >= 0.0 else negative_suffix
+    return f"{abs(float(value)):.2f}{suffix}"
+
+
+def _format_endpoint_location(lon: float, lat: float) -> str:
+    return f"{_format_coordinate(lon, 'E', 'W')}, {_format_coordinate(lat, 'N', 'S')}"
+
+
+def _annotate_section_endpoint_banner(
+    fig: plt.Figure,
+    transect: Transect,
+    *,
+    y: float,
+    left_x: float = 0.09,
+    right_x: float = 0.92,
+) -> None:
+    start_label = f"Start: {_format_endpoint_location(transect.start_lon, transect.start_lat)}"
+    end_label = f"End: {_format_endpoint_location(transect.end_lon, transect.end_lat)}"
+    fig.text(
+        left_x,
+        y,
+        start_label,
+        ha="left",
+        va="top",
+        fontsize=8.5,
+        color="#166534",
+        bbox={"facecolor": "#ecfdf5", "edgecolor": "#86efac", "alpha": 0.94, "pad": 2.0},
+    )
+    fig.text(
+        right_x,
+        y,
+        end_label,
+        ha="right",
+        va="top",
+        fontsize=8.5,
+        color="#991b1b",
+        bbox={"facecolor": "#fef2f2", "edgecolor": "#fca5a5", "alpha": 0.94, "pad": 2.0},
+    )
+
+
 def plot_pressure_cross_section_figure(
     *,
     transect: Transect,
@@ -956,6 +997,7 @@ def plot_pressure_cross_section_figure(
         fontsize=13,
         y=0.98,
     )
+    _annotate_section_endpoint_banner(fig, transect, y=0.942)
     fig.text(
         0.5,
         0.955,
@@ -1038,6 +1080,7 @@ def plot_isentropic_cross_section_figure(
         fontsize=13,
         y=0.98,
     )
+    _annotate_section_endpoint_banner(fig, transect, y=0.952)
     return fig
 
 
