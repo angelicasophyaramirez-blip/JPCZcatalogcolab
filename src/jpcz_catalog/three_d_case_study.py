@@ -1,0 +1,535 @@
+"""3-D single-event case-study helpers for Notebook 27."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import xarray as xr
+
+from .config import BoundingBox
+from .cross_sections import build_transect, section_from_field
+from .detect import compute_divergence_field
+from .diagnostics import compute_wind_speed_field
+
+EARTH_RADIUS_M = 6_371_000.0
+STANDARD_GRAVITY = 9.80665
+
+DEFAULT_3D_DOMAIN = BoundingBox(
+    lon_min=124.0,
+    lon_max=146.0,
+    lat_min=33.0,
+    lat_max=48.0,
+)
+
+DEFAULT_3D_PRESSURE_LEVELS_HPA: tuple[int, ...] = (
+    925,
+    850,
+    700,
+    600,
+    500,
+    400,
+    300,
+    250,
+    200,
+)
+
+DEFAULT_SLICE_START = (130.5, 36.0)
+DEFAULT_SLICE_END = (141.5, 42.0)
+
+
+@dataclass(frozen=True)
+class ThreeDCaseStudyData:
+    analysis_time: pd.Timestamp
+    domain: BoundingBox
+    center_lon: float
+    center_lat: float
+    pressure_volume: xr.Dataset
+    geopotential_height_km: xr.DataArray
+    wind_speed: xr.DataArray
+    moisture_proxy_700: xr.DataArray
+    divergence_925_display: xr.DataArray
+    terrain_m: xr.DataArray | None
+    terrain_x_km: np.ndarray | None
+    terrain_y_km: np.ndarray | None
+    x_km_3d: np.ndarray
+    y_km_3d: np.ndarray
+    slice_start: tuple[float, float] | None
+    slice_end: tuple[float, float] | None
+    slice_x_km: np.ndarray | None
+    slice_y_km: np.ndarray | None
+    slice_z_km: xr.DataArray | None
+    slice_omega: xr.DataArray | None
+    slice_lon: xr.DataArray | None
+    slice_lat: xr.DataArray | None
+    slice_terrain_km: np.ndarray | None
+
+
+def subset_to_bounds(field: xr.DataArray, domain: BoundingBox) -> xr.DataArray:
+    """Subset a 2-D field to one latitude/longitude box."""
+    return field.where(
+        (field.longitude >= float(domain.lon_min))
+        & (field.longitude <= float(domain.lon_max))
+        & (field.latitude >= float(domain.lat_min))
+        & (field.latitude <= float(domain.lat_max)),
+        drop=True,
+    )
+
+
+def load_surface_elevation_field(
+    cache_path: str | Path,
+    *,
+    domain: BoundingBox | None = None,
+) -> xr.DataArray | None:
+    """Load the cached ETOPO1-derived terrain field used in earlier notebooks."""
+    cache_path = Path(cache_path)
+    if not cache_path.exists():
+        return None
+
+    with xr.open_dataset(cache_path) as terrain_ds:
+        if "surface_elevation_m" not in terrain_ds.data_vars:
+            return None
+        terrain_field = terrain_ds["surface_elevation_m"].astype(float).load()
+
+    if "longitude" in terrain_field.coords and float(terrain_field.longitude.min().values) < 0.0:
+        terrain_field = terrain_field.assign_coords(
+            longitude=((terrain_field.longitude + 360.0) % 360.0)
+        )
+    if "longitude" in terrain_field.coords:
+        terrain_field = terrain_field.sortby("longitude")
+    if "latitude" in terrain_field.coords:
+        terrain_field = terrain_field.sortby("latitude")
+
+    if domain is not None:
+        terrain_field = subset_to_bounds(terrain_field, domain)
+    return terrain_field
+
+
+def load_case_event_catalog(catalog_path: str | Path) -> pd.DataFrame:
+    """Load the manual-verification catalog and parse event timestamps."""
+    catalog_df = pd.read_csv(catalog_path)
+    for column_name in ["event_start", "event_end", "event_peak"]:
+        if column_name in catalog_df.columns:
+            catalog_df[column_name] = pd.to_datetime(catalog_df[column_name])
+    return catalog_df
+
+
+def select_case_event(
+    catalog_df: pd.DataFrame,
+    *,
+    peak_time_utc: str | pd.Timestamp,
+) -> pd.Series:
+    """Return the requested event row from the catalog."""
+    peak_time_utc = pd.Timestamp(peak_time_utc)
+    match = catalog_df.loc[catalog_df["event_peak"] == peak_time_utc]
+    if match.empty:
+        raise RuntimeError(f"No event was found at peak time {peak_time_utc}.")
+    return match.iloc[0].copy()
+
+
+def _load_pressure_volume(
+    ds: xr.Dataset,
+    analysis_time: pd.Timestamp | str,
+    *,
+    domain: BoundingBox,
+    levels_hpa: tuple[int, ...],
+    variables: tuple[str, ...],
+) -> xr.Dataset:
+    available_levels = {int(level) for level in np.asarray(ds["level"].values).astype(int)}
+    selected_levels = [int(level) for level in levels_hpa if int(level) in available_levels]
+    if len(selected_levels) < 4:
+        raise RuntimeError("Fewer than four requested pressure levels are available for the 3-D case-study volume.")
+
+    volume = ds[list(variables)].sel(
+        time=pd.Timestamp(analysis_time),
+        longitude=slice(float(domain.lon_min), float(domain.lon_max)),
+        latitude=slice(float(domain.lat_max), float(domain.lat_min)),
+        level=selected_levels,
+    )
+    if "time" in volume.dims:
+        volume = volume.squeeze("time", drop=True)
+    volume = volume.sortby("level", ascending=False)
+    volume = volume.sortby("longitude")
+    volume = volume.sortby("latitude")
+    return volume.load()
+
+
+def _local_xy_km(
+    longitude: np.ndarray,
+    latitude: np.ndarray,
+    *,
+    center_lon: float,
+    center_lat: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    lon_values = np.asarray(longitude, dtype=float)
+    lat_values = np.asarray(latitude, dtype=float)
+    x_values = (
+        EARTH_RADIUS_M
+        * np.cos(np.deg2rad(float(center_lat)))
+        * np.deg2rad(lon_values - float(center_lon))
+        / 1000.0
+    )
+    y_values = EARTH_RADIUS_M * np.deg2rad(lat_values - float(center_lat)) / 1000.0
+    x_grid, y_grid = np.meshgrid(x_values, y_values)
+    return x_grid, y_grid
+
+
+def _local_xy_km_from_lonlat(
+    lon_values: np.ndarray,
+    lat_values: np.ndarray,
+    *,
+    center_lon: float,
+    center_lat: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    lon_values = np.asarray(lon_values, dtype=float)
+    lat_values = np.asarray(lat_values, dtype=float)
+    x_values = (
+        EARTH_RADIUS_M
+        * np.cos(np.deg2rad(float(center_lat)))
+        * np.deg2rad(lon_values - float(center_lon))
+        / 1000.0
+    )
+    y_values = EARTH_RADIUS_M * np.deg2rad(lat_values - float(center_lat)) / 1000.0
+    return x_values, y_values
+
+
+def _surface_height_km(snapshot: xr.Dataset) -> xr.DataArray:
+    height_km = (snapshot["geopotential"].astype(float) / STANDARD_GRAVITY / 1000.0).rename("geopotential_height_km")
+    height_km.attrs["units"] = "km"
+    return height_km
+
+
+def build_3d_case_study_data(
+    ds: xr.Dataset,
+    analysis_time: pd.Timestamp | str,
+    *,
+    domain: BoundingBox = DEFAULT_3D_DOMAIN,
+    levels_hpa: tuple[int, ...] = DEFAULT_3D_PRESSURE_LEVELS_HPA,
+    terrain_field: xr.DataArray | None = None,
+    slice_start: tuple[float, float] | None = DEFAULT_SLICE_START,
+    slice_end: tuple[float, float] | None = DEFAULT_SLICE_END,
+) -> ThreeDCaseStudyData:
+    """Load one event-centered 3-D volume and derive the first-pass visualization fields."""
+    pressure_volume = _load_pressure_volume(
+        ds,
+        analysis_time,
+        domain=domain,
+        levels_hpa=levels_hpa,
+        variables=(
+            "u_component_of_wind",
+            "v_component_of_wind",
+            "geopotential",
+            "vertical_velocity",
+            "specific_humidity",
+        ),
+    )
+
+    center_lon = 0.5 * (float(domain.lon_min) + float(domain.lon_max))
+    center_lat = 0.5 * (float(domain.lat_min) + float(domain.lat_max))
+    x_grid_2d, y_grid_2d = _local_xy_km(
+        pressure_volume.longitude.values,
+        pressure_volume.latitude.values,
+        center_lon=center_lon,
+        center_lat=center_lat,
+    )
+    x_km_3d = np.broadcast_to(x_grid_2d[np.newaxis, :, :], pressure_volume["geopotential"].shape)
+    y_km_3d = np.broadcast_to(y_grid_2d[np.newaxis, :, :], pressure_volume["geopotential"].shape)
+
+    geopotential_height_km = _surface_height_km(pressure_volume)
+    wind_speed = compute_wind_speed_field(pressure_volume)
+    moisture_proxy_700 = (
+        -1000.0
+        * pressure_volume["specific_humidity"].sel(level=700).astype(float)
+        * pressure_volume["vertical_velocity"].sel(level=700).astype(float)
+    ).rename("moisture_proxy_700")
+    moisture_proxy_700.attrs["units"] = "1e-3 Pa s^-1"
+
+    snapshot_925 = pressure_volume.sel(level=925)
+    divergence_925_display = (compute_divergence_field(snapshot_925) * 1e5).rename("divergence_925_display")
+    divergence_925_display.attrs["units"] = "1e-5 s^-1"
+
+    terrain_subset = None
+    terrain_x_km = None
+    terrain_y_km = None
+    if terrain_field is not None:
+        terrain_subset = subset_to_bounds(terrain_field, domain)
+        terrain_x_km, terrain_y_km = _local_xy_km(
+            terrain_subset.longitude.values,
+            terrain_subset.latitude.values,
+            center_lon=center_lon,
+            center_lat=center_lat,
+        )
+
+    slice_x_km = None
+    slice_y_km = None
+    slice_z_km = None
+    slice_omega = None
+    slice_lon = None
+    slice_lat = None
+    slice_terrain_km = None
+    if slice_start is not None and slice_end is not None:
+        transect = build_transect(
+            float(slice_start[0]),
+            float(slice_start[1]),
+            float(slice_end[0]),
+            float(slice_end[1]),
+            num_points=121,
+        )
+        slice_lon = transect.lon
+        slice_lat = transect.lat
+        x_line_km, y_line_km = _local_xy_km_from_lonlat(
+            transect.lon.values,
+            transect.lat.values,
+            center_lon=center_lon,
+            center_lat=center_lat,
+        )
+        slice_z_km = section_from_field(geopotential_height_km, transect)
+        slice_omega = section_from_field(
+            pressure_volume["vertical_velocity"].astype(float).rename("omega"),
+            transect,
+        )
+        slice_x_km = np.broadcast_to(x_line_km[np.newaxis, :], slice_z_km.shape)
+        slice_y_km = np.broadcast_to(y_line_km[np.newaxis, :], slice_z_km.shape)
+        if terrain_subset is not None:
+            terrain_along_slice = terrain_subset.interp(
+                longitude=transect.lon,
+                latitude=transect.lat,
+                method="nearest",
+            )
+            slice_terrain_km = (
+                terrain_along_slice.where(np.isfinite(terrain_along_slice), 0.0)
+                .astype(float)
+                .values
+                / 1000.0
+            )
+
+    return ThreeDCaseStudyData(
+        analysis_time=pd.Timestamp(analysis_time),
+        domain=domain,
+        center_lon=center_lon,
+        center_lat=center_lat,
+        pressure_volume=pressure_volume,
+        geopotential_height_km=geopotential_height_km,
+        wind_speed=wind_speed,
+        moisture_proxy_700=moisture_proxy_700,
+        divergence_925_display=divergence_925_display,
+        terrain_m=terrain_subset,
+        terrain_x_km=terrain_x_km,
+        terrain_y_km=terrain_y_km,
+        x_km_3d=x_km_3d,
+        y_km_3d=y_km_3d,
+        slice_start=slice_start,
+        slice_end=slice_end,
+        slice_x_km=slice_x_km,
+        slice_y_km=slice_y_km,
+        slice_z_km=slice_z_km,
+        slice_omega=slice_omega,
+        slice_lon=slice_lon,
+        slice_lat=slice_lat,
+        slice_terrain_km=slice_terrain_km,
+    )
+
+
+def build_case_metadata_table(event_row: pd.Series) -> pd.DataFrame:
+    """Return a compact event-summary table for notebook display."""
+    summary = {
+        "event_peak_utc": pd.Timestamp(event_row["event_peak"]),
+        "duration_hours": event_row.get("duration_hours"),
+        "default_label": event_row.get("manual_objective_label", event_row.get("cleaned_k3_label")),
+        "cleaned_label": event_row.get("cleaned_k3_label"),
+        "candidate_peak_convergence_1e5_s-1": event_row.get("candidate_peak_convergence_1e5_s-1"),
+        "peak_max_convergence_lat": event_row.get("peak_max_convergence_lat"),
+        "peak_max_convergence_lon": event_row.get("peak_max_convergence_lon"),
+        "manual_verification_flag": event_row.get("manual_verification"),
+        "manual_notes": event_row.get("manual_notes"),
+    }
+    return pd.DataFrame({"field": list(summary), "value": list(summary.values())})
+
+
+def create_3d_case_figure(
+    case_data: ThreeDCaseStudyData,
+    *,
+    title: str | None = None,
+    show_moisture_sheet: bool = True,
+    show_divergence_sheet: bool = True,
+    show_slice_curtain: bool = True,
+    jet_isomin: float = 35.0,
+    jet_isomax: float | None = None,
+) -> Any:
+    """Build the rotatable Plotly figure for one event-centered case-study cube."""
+    import plotly.graph_objects as go
+
+    jet_values = np.asarray(case_data.wind_speed.values, dtype=float)
+    z_values = np.asarray(case_data.geopotential_height_km.values, dtype=float)
+    if jet_isomax is None:
+        jet_isomax = float(np.nanmax(jet_values))
+
+    figure = go.Figure()
+
+    if case_data.terrain_m is not None and case_data.terrain_x_km is not None and case_data.terrain_y_km is not None:
+        terrain_values_km = np.asarray(case_data.terrain_m.values, dtype=float) / 1000.0
+        figure.add_trace(
+            go.Surface(
+                x=case_data.terrain_x_km,
+                y=case_data.terrain_y_km,
+                z=terrain_values_km,
+                surfacecolor=np.asarray(case_data.terrain_m.values, dtype=float),
+                colorscale="Earth",
+                cmin=0.0,
+                cmax=max(3000.0, float(np.nanmax(np.asarray(case_data.terrain_m.values, dtype=float)))),
+                showscale=False,
+                opacity=0.96,
+                name="Terrain",
+                hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>terrain=%{surfacecolor:.0f} m<extra></extra>",
+            )
+        )
+
+    figure.add_trace(
+        go.Isosurface(
+            x=case_data.x_km_3d.ravel(),
+            y=case_data.y_km_3d.ravel(),
+            z=z_values.ravel(),
+            value=jet_values.ravel(),
+            isomin=float(jet_isomin),
+            isomax=float(jet_isomax),
+            surface_count=4,
+            opacity=0.34,
+            colorscale="Blues",
+            caps={"x": {"show": False}, "y": {"show": False}, "z": {"show": False}},
+            colorbar={"title": "Wind [m s^-1]", "x": 1.02, "y": 0.82, "len": 0.30},
+            name="Upper-level jet",
+            hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>wind=%{value:.1f} m s^-1<extra></extra>",
+        )
+    )
+
+    if show_moisture_sheet:
+        height_700 = np.asarray(case_data.geopotential_height_km.sel(level=700).values, dtype=float)
+        figure.add_trace(
+            go.Surface(
+                x=case_data.x_km_3d[0],
+                y=case_data.y_km_3d[0],
+                z=height_700,
+                surfacecolor=np.asarray(case_data.moisture_proxy_700.values, dtype=float),
+                colorscale="BrBG",
+                cmin=-2.5,
+                cmax=2.5,
+                opacity=0.58,
+                showscale=True,
+                colorbar={"title": "700 hPa q x (-omega)", "x": 1.02, "y": 0.46, "len": 0.22},
+                name="700 hPa moisture proxy",
+                hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>q x (-omega)=%{surfacecolor:.2f}<extra></extra>",
+            )
+        )
+
+    if show_divergence_sheet:
+        height_925 = np.asarray(case_data.geopotential_height_km.sel(level=925).values, dtype=float)
+        figure.add_trace(
+            go.Surface(
+                x=case_data.x_km_3d[0],
+                y=case_data.y_km_3d[0],
+                z=height_925,
+                surfacecolor=np.asarray(case_data.divergence_925_display.values, dtype=float),
+                colorscale="RdBu_r",
+                cmin=-6.0,
+                cmax=6.0,
+                opacity=0.56,
+                showscale=True,
+                colorbar={"title": "925 hPa div", "x": 1.02, "y": 0.14, "len": 0.22},
+                name="925 hPa divergence",
+                hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>div=%{surfacecolor:.2f} [1e-5 s^-1]<extra></extra>",
+            )
+        )
+
+    if (
+        show_slice_curtain
+        and case_data.slice_x_km is not None
+        and case_data.slice_y_km is not None
+        and case_data.slice_z_km is not None
+        and case_data.slice_omega is not None
+    ):
+        figure.add_trace(
+            go.Surface(
+                x=case_data.slice_x_km,
+                y=case_data.slice_y_km,
+                z=np.asarray(case_data.slice_z_km.values, dtype=float),
+                surfacecolor=np.asarray(case_data.slice_omega.values, dtype=float),
+                colorscale="RdBu_r",
+                cmin=-0.8,
+                cmax=0.8,
+                opacity=0.42,
+                showscale=False,
+                name="Slice curtain (omega)",
+                hovertemplate="x=%{x:.0f} km<br>y=%{y:.0f} km<br>z=%{z:.2f} km<br>omega=%{surfacecolor:.2f} Pa s^-1<extra></extra>",
+            )
+        )
+        if case_data.slice_terrain_km is not None and case_data.slice_lon is not None and case_data.slice_lat is not None:
+            x_line_km, y_line_km = _local_xy_km_from_lonlat(
+                case_data.slice_lon.values,
+                case_data.slice_lat.values,
+                center_lon=case_data.center_lon,
+                center_lat=case_data.center_lat,
+            )
+            figure.add_trace(
+                go.Scatter3d(
+                    x=x_line_km,
+                    y=y_line_km,
+                    z=case_data.slice_terrain_km,
+                    mode="lines",
+                    line={"color": "#7c3aed", "width": 5},
+                    name="Slice line",
+                    hoverinfo="skip",
+                )
+            )
+            figure.add_trace(
+                go.Scatter3d(
+                    x=[float(x_line_km[0])],
+                    y=[float(y_line_km[0])],
+                    z=[float(case_data.slice_terrain_km[0])],
+                    mode="markers+text",
+                    marker={"color": "#16a34a", "size": 6},
+                    text=["Start"],
+                    textposition="top center",
+                    name="Slice start",
+                    hovertemplate="Start<extra></extra>",
+                )
+            )
+            figure.add_trace(
+                go.Scatter3d(
+                    x=[float(x_line_km[-1])],
+                    y=[float(y_line_km[-1])],
+                    z=[float(case_data.slice_terrain_km[-1])],
+                    mode="markers+text",
+                    marker={"color": "#dc2626", "size": 6},
+                    text=["End"],
+                    textposition="top center",
+                    name="Slice end",
+                    hovertemplate="End<extra></extra>",
+                )
+            )
+
+    x_extent = max(1.0, float(np.nanmax(np.abs(case_data.x_km_3d))))
+    y_extent = max(1.0, float(np.nanmax(np.abs(case_data.y_km_3d))))
+    z_extent = max(3.0, float(np.nanmax(z_values)))
+    if title is None:
+        title = f"3-D case-study cube | {case_data.analysis_time:%Y-%m-%d %H:%M UTC}"
+
+    figure.update_layout(
+        title=title,
+        margin={"l": 10, "r": 10, "t": 55, "b": 10},
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.01, "xanchor": "left", "x": 0.0},
+        scene={
+            "xaxis": {"title": "x [km] relative to cube center", "backgroundcolor": "#f8fafc"},
+            "yaxis": {"title": "y [km] relative to cube center", "backgroundcolor": "#f8fafc"},
+            "zaxis": {"title": "z [km ASL]", "backgroundcolor": "#f8fafc"},
+            "aspectmode": "manual",
+            "aspectratio": {"x": x_extent / y_extent, "y": 1.0, "z": min(1.1, z_extent / y_extent * 1.8)},
+            "camera": {
+                "eye": {"x": 1.55, "y": -1.85, "z": 0.95},
+                "up": {"x": 0.0, "y": 0.0, "z": 1.0},
+            },
+        },
+    )
+    return figure

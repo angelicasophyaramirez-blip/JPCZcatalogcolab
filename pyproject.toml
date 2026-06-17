@@ -18,6 +18,7 @@ dependencies = [
   "metpy",
   "numpy",
   "pandas",
+  "plotly",
   "regionmask",
   "scipy",
   "shapely",

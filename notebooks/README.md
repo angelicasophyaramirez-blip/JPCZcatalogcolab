@@ -29,6 +29,8 @@ Planned order:
 23. `23_objective_regime_timing_and_impact.ipynb`
 24. `24_objective_regime_manual_verification_atlas.ipynb`
 25. `25_continuous_spell_evolution_and_onset_timing.ipynb`
+26. `26_timing_group_manual_verification_atlas.ipynb`
+27. `27_single_event_3d_case_study.ipynb`
 
 Design rule:
 
@@ -57,3 +59,5 @@ Design rule:
 - Notebook 23 keeps the peak-event timing baseline, transition counts, and the future merge point for a coastal snow / precipitation impact table
 - Notebook 24 is the manual-review atlas for the new workflow, tying objective labels and spell timing to moisture, divergence, quicklook, OLR, and satellite context
 - Notebook 25 builds broader catalog spells first, checkpoints reusable continuous spell means, and then applies the candidate threshold profiles through time so offshore/coastal evolution can be tracked beyond event peaks
+- Notebook 26 is the timing-group manual-review atlas, including synoptic funnel diagnostics and cross-section setup / rendering
+- Notebook 27 is reserved for a single-event 3-D case-study prototype that links terrain, jet structure, low-level convergence, moisture proxy layers, and one diagnostic slice
