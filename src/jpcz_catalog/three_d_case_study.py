@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +79,18 @@ class ThreeDCaseStudyData:
     slice_lon: xr.DataArray | None
     slice_lat: xr.DataArray | None
     slice_terrain_km: np.ndarray | None
+
+
+@dataclass(frozen=True)
+class JetSliceGuide:
+    level_hpa: int
+    threshold_ms: float
+    axis_start: tuple[float, float]
+    axis_end: tuple[float, float]
+    entrance_slice_start: tuple[float, float]
+    entrance_slice_end: tuple[float, float]
+    exit_slice_start: tuple[float, float]
+    exit_slice_end: tuple[float, float]
 
 
 def subset_to_bounds(field: xr.DataArray, domain: BoundingBox) -> xr.DataArray:
@@ -218,6 +230,20 @@ def _local_xy_km_from_lonlat(
     return x_values, y_values
 
 
+def _lonlat_from_local_xy_km(
+    x_values_km: np.ndarray | float,
+    y_values_km: np.ndarray | float,
+    *,
+    center_lon: float,
+    center_lat: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    x_values = np.asarray(x_values_km, dtype=float)
+    y_values = np.asarray(y_values_km, dtype=float)
+    longitude = float(center_lon) + np.rad2deg((x_values * 1000.0) / (EARTH_RADIUS_M * np.cos(np.deg2rad(float(center_lat)))))
+    latitude = float(center_lat) + np.rad2deg((y_values * 1000.0) / EARTH_RADIUS_M)
+    return longitude, latitude
+
+
 def _surface_height_km(snapshot: xr.Dataset) -> xr.DataArray:
     height_km = (snapshot["geopotential"].astype(float) / STANDARD_GRAVITY / 1000.0).rename("geopotential_height_km")
     height_km.attrs["units"] = "km"
@@ -306,6 +332,225 @@ def _build_regular_height_volume(
             regular_volume[inside, j, i] = np.interp(z_levels_km[inside], z_unique, field_unique)
 
     return x_regular, y_regular, z_levels_km, regular_volume
+
+
+def derive_jet_slice_guide(
+    case_data: ThreeDCaseStudyData,
+    *,
+    level_hpa: int = 300,
+    jet_threshold_ms: float = 35.0,
+    fallback_quantile: float = 0.90,
+    axis_quantiles: tuple[float, float] = (0.12, 0.88),
+    entrance_projection_quantile: float = 0.30,
+    exit_projection_quantile: float = 0.70,
+    min_slice_half_length_km: float = 180.0,
+    max_slice_half_length_km: float = 420.0,
+    min_points: int = 24,
+) -> JetSliceGuide:
+    """Estimate a jet-axis line and jet-normal entrance/exit slices from the 300 hPa jet core."""
+    level_hpa = int(level_hpa)
+    wind_field = case_data.wind_speed.sel(level=level_hpa)
+    u_field = case_data.pressure_volume["u_component_of_wind"].sel(level=level_hpa).astype(float)
+    v_field = case_data.pressure_volume["v_component_of_wind"].sel(level=level_hpa).astype(float)
+
+    wind_values = np.asarray(wind_field.values, dtype=float)
+    u_values = np.asarray(u_field.values, dtype=float)
+    v_values = np.asarray(v_field.values, dtype=float)
+    x_grid = np.asarray(case_data.x_km_3d[0], dtype=float)
+    y_grid = np.asarray(case_data.y_km_3d[0], dtype=float)
+
+    valid = np.isfinite(wind_values) & np.isfinite(u_values) & np.isfinite(v_values)
+    threshold_ms = float(jet_threshold_ms)
+    if np.count_nonzero(valid & (wind_values >= threshold_ms)) < int(min_points):
+        threshold_ms = max(float(np.nanquantile(wind_values[valid], float(fallback_quantile))), 20.0)
+
+    jet_mask = valid & (wind_values >= threshold_ms)
+    if np.count_nonzero(jet_mask) < int(min_points):
+        raise RuntimeError("Could not identify enough jet-core points to derive jet-relative slices.")
+
+    weights = np.maximum(wind_values[jet_mask] - threshold_ms + 1.0, 1.0)
+    coords = np.column_stack([x_grid[jet_mask], y_grid[jet_mask]])
+    centroid_xy = np.average(coords, axis=0, weights=weights)
+    centered = coords - centroid_xy
+    covariance = np.cov(centered.T, aweights=weights)
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    axis_unit_xy = eigenvectors[:, int(np.argmax(eigenvalues))]
+
+    mean_wind_xy = np.array(
+        [
+            np.average(u_values[jet_mask], weights=weights),
+            np.average(v_values[jet_mask], weights=weights),
+        ],
+        dtype=float,
+    )
+    if float(np.dot(mean_wind_xy, axis_unit_xy)) < 0.0:
+        axis_unit_xy = -axis_unit_xy
+
+    normal_unit_xy = np.array([-axis_unit_xy[1], axis_unit_xy[0]], dtype=float)
+    along_projection = centered @ axis_unit_xy
+    normal_projection = centered @ normal_unit_xy
+
+    axis_start_projection = float(np.nanquantile(along_projection, float(axis_quantiles[0])))
+    axis_end_projection = float(np.nanquantile(along_projection, float(axis_quantiles[1])))
+    entrance_projection = float(np.nanquantile(along_projection, float(entrance_projection_quantile)))
+    exit_projection = float(np.nanquantile(along_projection, float(exit_projection_quantile)))
+    slice_half_length_km = float(
+        np.clip(
+            np.nanquantile(np.abs(normal_projection), 0.90) * 1.4,
+            float(min_slice_half_length_km),
+            float(max_slice_half_length_km),
+        )
+    )
+
+    axis_start_xy = centroid_xy + axis_start_projection * axis_unit_xy
+    axis_end_xy = centroid_xy + axis_end_projection * axis_unit_xy
+    entrance_center_xy = centroid_xy + entrance_projection * axis_unit_xy
+    exit_center_xy = centroid_xy + exit_projection * axis_unit_xy
+
+    entrance_start_xy = entrance_center_xy - slice_half_length_km * normal_unit_xy
+    entrance_end_xy = entrance_center_xy + slice_half_length_km * normal_unit_xy
+    exit_start_xy = exit_center_xy - slice_half_length_km * normal_unit_xy
+    exit_end_xy = exit_center_xy + slice_half_length_km * normal_unit_xy
+
+    axis_start_lon, axis_start_lat = _lonlat_from_local_xy_km(
+        axis_start_xy[0],
+        axis_start_xy[1],
+        center_lon=case_data.center_lon,
+        center_lat=case_data.center_lat,
+    )
+    axis_end_lon, axis_end_lat = _lonlat_from_local_xy_km(
+        axis_end_xy[0],
+        axis_end_xy[1],
+        center_lon=case_data.center_lon,
+        center_lat=case_data.center_lat,
+    )
+    entrance_start_lon, entrance_start_lat = _lonlat_from_local_xy_km(
+        entrance_start_xy[0],
+        entrance_start_xy[1],
+        center_lon=case_data.center_lon,
+        center_lat=case_data.center_lat,
+    )
+    entrance_end_lon, entrance_end_lat = _lonlat_from_local_xy_km(
+        entrance_end_xy[0],
+        entrance_end_xy[1],
+        center_lon=case_data.center_lon,
+        center_lat=case_data.center_lat,
+    )
+    exit_start_lon, exit_start_lat = _lonlat_from_local_xy_km(
+        exit_start_xy[0],
+        exit_start_xy[1],
+        center_lon=case_data.center_lon,
+        center_lat=case_data.center_lat,
+    )
+    exit_end_lon, exit_end_lat = _lonlat_from_local_xy_km(
+        exit_end_xy[0],
+        exit_end_xy[1],
+        center_lon=case_data.center_lon,
+        center_lat=case_data.center_lat,
+    )
+
+    return JetSliceGuide(
+        level_hpa=level_hpa,
+        threshold_ms=threshold_ms,
+        axis_start=(float(axis_start_lon), float(axis_start_lat)),
+        axis_end=(float(axis_end_lon), float(axis_end_lat)),
+        entrance_slice_start=(float(entrance_start_lon), float(entrance_start_lat)),
+        entrance_slice_end=(float(entrance_end_lon), float(entrance_end_lat)),
+        exit_slice_start=(float(exit_start_lon), float(exit_start_lat)),
+        exit_slice_end=(float(exit_end_lon), float(exit_end_lat)),
+    )
+
+
+def build_jet_slice_table(jet_slice_guide: JetSliceGuide) -> pd.DataFrame:
+    """Return a compact summary table for the derived jet axis and jet-relative slices."""
+    rows = [
+        {
+            "feature": "jet_axis",
+            "start_lon": jet_slice_guide.axis_start[0],
+            "start_lat": jet_slice_guide.axis_start[1],
+            "end_lon": jet_slice_guide.axis_end[0],
+            "end_lat": jet_slice_guide.axis_end[1],
+        },
+        {
+            "feature": "entrance_slice",
+            "start_lon": jet_slice_guide.entrance_slice_start[0],
+            "start_lat": jet_slice_guide.entrance_slice_start[1],
+            "end_lon": jet_slice_guide.entrance_slice_end[0],
+            "end_lat": jet_slice_guide.entrance_slice_end[1],
+        },
+        {
+            "feature": "exit_slice",
+            "start_lon": jet_slice_guide.exit_slice_start[0],
+            "start_lat": jet_slice_guide.exit_slice_start[1],
+            "end_lon": jet_slice_guide.exit_slice_end[0],
+            "end_lat": jet_slice_guide.exit_slice_end[1],
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def case_with_slice(
+    case_data: ThreeDCaseStudyData,
+    *,
+    slice_start: tuple[float, float] | None,
+    slice_end: tuple[float, float] | None,
+) -> ThreeDCaseStudyData:
+    """Reuse an already loaded 3-D case volume but attach a different slice."""
+    slice_x_km = None
+    slice_y_km = None
+    slice_z_km = None
+    slice_omega = None
+    slice_lon = None
+    slice_lat = None
+    slice_terrain_km = None
+    if slice_start is not None and slice_end is not None:
+        transect = build_transect(
+            float(slice_start[0]),
+            float(slice_start[1]),
+            float(slice_end[0]),
+            float(slice_end[1]),
+            num_points=121,
+        )
+        slice_lon = transect.lon
+        slice_lat = transect.lat
+        x_line_km, y_line_km = _local_xy_km_from_lonlat(
+            transect.lon.values,
+            transect.lat.values,
+            center_lon=case_data.center_lon,
+            center_lat=case_data.center_lat,
+        )
+        slice_z_km = section_from_field(case_data.geopotential_height_km, transect)
+        slice_omega = section_from_field(
+            case_data.pressure_volume["vertical_velocity"].astype(float).rename("omega"),
+            transect,
+        )
+        slice_x_km = np.broadcast_to(x_line_km[np.newaxis, :], slice_z_km.shape)
+        slice_y_km = np.broadcast_to(y_line_km[np.newaxis, :], slice_z_km.shape)
+        if case_data.terrain_m is not None:
+            terrain_along_slice = case_data.terrain_m.interp(
+                longitude=transect.lon,
+                latitude=transect.lat,
+                method="nearest",
+            )
+            slice_terrain_km = (
+                terrain_along_slice.where(np.isfinite(terrain_along_slice), 0.0)
+                .astype(float)
+                .values
+                / 1000.0
+            )
+
+    return replace(
+        case_data,
+        slice_start=slice_start,
+        slice_end=slice_end,
+        slice_x_km=slice_x_km,
+        slice_y_km=slice_y_km,
+        slice_z_km=slice_z_km,
+        slice_omega=slice_omega,
+        slice_lon=slice_lon,
+        slice_lat=slice_lat,
+        slice_terrain_km=slice_terrain_km,
+    )
 
 
 def build_3d_case_study_data(
