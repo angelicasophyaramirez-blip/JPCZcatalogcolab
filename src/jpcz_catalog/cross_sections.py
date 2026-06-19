@@ -14,9 +14,13 @@ from .config import BoundingBox
 
 EARTH_RADIUS_M = 6_371_000.0
 STANDARD_GRAVITY = 9.80665
-OMEGA_VECTOR_SCALE = 140.0
+OMEGA_VECTOR_SCALE = 55.0
 PRESSURE_BOTTOM_HPA = 1000.0
 PRESSURE_TOP_HPA = 150.0
+PRESSURE_PANEL_POINT_VECTOR_COUNT = 16
+PRESSURE_PANEL_LEVEL_VECTOR_COUNT = 6
+PV_UNDER_COLOR = "#f3f4f6"
+PV_BAD_COLOR = "#d1d5db"
 DEFAULT_PRESSURE_LEVELS_HPA: tuple[int, ...] = (
     1000,
     975,
@@ -574,6 +578,20 @@ def _rounded_levels_from_data(values: np.ndarray, *, step: float) -> np.ndarray:
     return np.arange(lower, upper + 0.5 * step, step)
 
 
+def _configured_cmap(
+    cmap: str,
+    *,
+    under_color: str | None = None,
+    bad_color: str | None = None,
+):
+    copied = plt.get_cmap(cmap).copy()
+    if under_color is not None:
+        copied.set_under(under_color)
+    if bad_color is not None:
+        copied.set_bad(bad_color)
+    return copied
+
+
 def _signed_levels_from_data(
     values: np.ndarray,
     *,
@@ -673,6 +691,8 @@ def _draw_pressure_panel(
     wind_render_mode: str = "vectors",
     panel_extend: str = "both",
     extra_contours: tuple[xr.DataArray, np.ndarray, str, float, str] | None = None,
+    under_color: str | None = None,
+    bad_color: str | None = None,
 ) -> tuple[object, object]:
     """Render one pressure-coordinate section panel."""
     x_grid, y_grid = _section_mesh_coords(section_field)
@@ -681,7 +701,7 @@ def _draw_pressure_panel(
         y_grid,
         np.asarray(section_field.values, dtype=float),
         levels=np.asarray(levels, dtype=float),
-        cmap=cmap,
+        cmap=_configured_cmap(cmap, under_color=under_color, bad_color=bad_color),
         extend=panel_extend,
     )
 
@@ -730,8 +750,8 @@ def _draw_pressure_panel(
             label_mode="zonal" if zonal_wind_section is not None else "signed",
         )
     else:
-        point_stride = max(1, section_field.sizes["point"] // 22)
-        level_stride = max(1, section_field.sizes["level"] // 8)
+        point_stride = max(1, section_field.sizes["point"] // PRESSURE_PANEL_POINT_VECTOR_COUNT)
+        level_stride = max(1, section_field.sizes["level"] // PRESSURE_PANEL_LEVEL_VECTOR_COUNT)
         x_sample = np.asarray(section_field["distance_km"].values, dtype=float)[::point_stride]
         y_sample = np.asarray(section_field["level"].values, dtype=float)[::level_stride]
         along_sample = np.asarray(along_wind_section.values, dtype=float)[::level_stride, ::point_stride]
@@ -743,17 +763,17 @@ def _draw_pressure_panel(
                 y_sample[:, np.newaxis].repeat(len(x_sample), axis=1),
                 along_sample,
                 omega_sample,
-                length=5.0,
-                linewidth=0.55,
-                barbcolor="black",
-                flagcolor="black",
-                alpha=0.72,
+                length=4.8,
+                linewidth=0.45,
+                barbcolor="#111827",
+                flagcolor="#111827",
+                alpha=0.64,
                 zorder=5,
             )
             ax.text(
                 0.99,
                 1.02,
-                "Wind barbs",
+                f"Wind barbs | omega × {OMEGA_VECTOR_SCALE:.0f}",
                 transform=ax.transAxes,
                 ha="right",
                 va="bottom",
@@ -766,15 +786,15 @@ def _draw_pressure_panel(
                 y_sample,
                 along_sample,
                 omega_sample,
-                color="black",
+                color="#111827",
                 angles="xy",
                 scale_units="xy",
                 scale=1.0,
-                width=0.0018,
-                headwidth=3.4,
-                headlength=4.5,
-                headaxislength=3.8,
-                alpha=0.75,
+                width=0.00145,
+                headwidth=3.1,
+                headlength=4.1,
+                headaxislength=3.5,
+                alpha=0.64,
                 zorder=5,
             )
             ax.quiverkey(
@@ -782,7 +802,7 @@ def _draw_pressure_panel(
                 0.99,
                 1.02,
                 20.0,
-                "20 m s$^{-1}$ total along-section wind",
+                f"20 m s$^{{-1}}$ along-section wind | omega × {OMEGA_VECTOR_SCALE:.0f}",
                 coordinates="axes",
                 labelpos="E",
                 fontproperties={"size": 8},
@@ -938,8 +958,8 @@ def plot_pressure_cross_section_figure(
         section_field=omega_section,
         cmap="RdBu_r",
         levels=DEFAULT_OMEGA_LEVELS_PA_S,
-        colorbar_label="Omega [Pa s$^{-1}$]",
-        title=f"Jet-normal pressure section: omega shading, theta contours, and total along-section wind + scaled omega {wind_label}",
+        colorbar_label="Omega [Pa s$^{-1}$] (negative = ascent)",
+        title=f"Jet-normal pressure section: omega shading (negative = ascent), theta contours, and total along-section wind + reduced-scale omega {wind_label}",
         theta_section=theta_section,
         along_wind_section=along_wind_section,
         omega_section=omega_section,
@@ -954,8 +974,8 @@ def plot_pressure_cross_section_figure(
         section_field=moisture_proxy_section,
         cmap="BrBG",
         levels=DEFAULT_MOISTURE_PROXY_LEVELS,
-        colorbar_label="q × (-omega) [1e-3 Pa s$^{-1}$]",
-        title=f"Moist-ascent surrogate section: q × (-omega) shading with theta and total along-section wind + scaled omega {wind_label}",
+        colorbar_label="q × (-omega) [1e-3 Pa s$^{-1}$] (positive = moist ascent)",
+        title=f"Moist-ascent surrogate section: q × (-omega) shading (positive = moist ascent) with theta and total along-section wind + reduced-scale omega {wind_label}",
         theta_section=theta_section,
         along_wind_section=along_wind_section,
         omega_section=omega_section,
@@ -971,7 +991,7 @@ def plot_pressure_cross_section_figure(
         cmap="viridis",
         levels=DEFAULT_PV_LEVELS_PVU,
         colorbar_label="Potential vorticity [PVU]",
-        title=f"PV-focused section: PV shading, theta contours, total along-section wind + scaled omega {wind_label}, and the 2-PVU line",
+        title=f"PV-focused section: PV shading, theta contours, total along-section wind + reduced-scale omega {wind_label}, and the 2-PVU line",
         theta_section=theta_section,
         along_wind_section=along_wind_section,
         omega_section=omega_section,
@@ -980,7 +1000,9 @@ def plot_pressure_cross_section_figure(
         terrain_height_m=terrain_height_m,
         wind_render_mode=wind_render_mode,
         extra_contours=(pv_section, np.array([2.0]), "#f59e0b", 2.4, "2 PVU"),
-        panel_extend="max",
+        panel_extend="both",
+        under_color=PV_UNDER_COLOR,
+        bad_color=PV_BAD_COLOR,
     )
 
     pv_isotach_fill, _ = _draw_pressure_panel(
@@ -998,7 +1020,9 @@ def plot_pressure_cross_section_figure(
         terrain_height_m=terrain_height_m,
         theta_color="#111111",
         wind_render_mode="signed_isotachs",
-        panel_extend="max",
+        panel_extend="both",
+        under_color=PV_UNDER_COLOR,
+        bad_color=PV_BAD_COLOR,
     )
     axes[-1].set_xlabel("Distance along section [km]")
     _annotate_section_axis_endpoints(axes[-1], transect, y_offset=-0.16)
@@ -1010,8 +1034,8 @@ def plot_pressure_cross_section_figure(
         colorbar_axes,
         [omega_fill, moisture_fill, pv_fill, pv_isotach_fill],
         [
-            "Omega [Pa s$^{-1}$]",
-            "q × (-omega) [1e-3 Pa s$^{-1}$]",
+            "Omega [Pa s$^{-1}$] (negative = ascent)",
+            "q × (-omega) [1e-3 Pa s$^{-1}$] (positive = moist ascent)",
             "Potential vorticity [PVU]",
             "Potential vorticity [PVU]",
         ],
@@ -1027,6 +1051,19 @@ def plot_pressure_cross_section_figure(
     for axis in axes:
         _annotate_transect_reference_labels(axis, transect, terrain_height_m)
 
+    for axis in axes[2:]:
+        axis.text(
+            0.02,
+            0.93,
+            "Light gray: PV < 0.25 PVU or unavailable",
+            transform=axis.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            color="#374151",
+            bbox={"facecolor": "white", "alpha": 0.78, "edgecolor": "none", "pad": 1.5},
+        )
+
     fig.suptitle(
         f"Cross sections | {group_id} | {time_role} | {analysis_time:%Y-%m-%d %H:%M UTC}",
         fontsize=13,
@@ -1038,8 +1075,9 @@ def plot_pressure_cross_section_figure(
         0.955,
         (
             f"{'Wind barbs' if str(wind_render_mode).lower() == 'barbs' else 'Vectors'} show the horizontal wind projected "
-            "onto the transect direction, paired with scaled omega in the upper panels; the bottom panel adds black theta "
-            "contours and signed zonal isotachs (blue westerly, orange easterly)."
+            f"onto the transect direction, paired with omega × {OMEGA_VECTOR_SCALE:.0f} for visibility in the upper three panels "
+            "(negative omega = ascent); the moist-ascent proxy uses q × (-omega), so positive values mark moist ascent; "
+            "the bottom panel adds black theta contours and signed zonal isotachs (blue westerly, orange easterly)."
         ),
         ha="center",
         va="top",
@@ -1074,8 +1112,8 @@ def plot_isentropic_cross_section_figure(
             moist_proxy_on_theta,
             "BrBG",
             DEFAULT_MOISTURE_PROXY_LEVELS,
-            "Isentropic diagnostic: q × (-omega) interpolated onto theta surfaces",
-            "q × (-omega) [1e-3 Pa s$^{-1}$]",
+            "Isentropic diagnostic: q × (-omega) interpolated onto theta surfaces (positive = moist ascent)",
+            "q × (-omega) [1e-3 Pa s$^{-1}$] (positive = moist ascent)",
         ),
         (
             axes[1],
@@ -1091,8 +1129,8 @@ def plot_isentropic_cross_section_figure(
             y_grid,
             np.asarray(field.values, dtype=float),
             levels=np.asarray(levels, dtype=float),
-            cmap=cmap,
-            extend="both" if cmap == "BrBG" else "max",
+            cmap=_configured_cmap(cmap, under_color=PV_UNDER_COLOR, bad_color=PV_BAD_COLOR) if cmap == "viridis" else cmap,
+            extend="both",
         )
         pressure_contours = ax.contour(
             x_grid,
@@ -1106,6 +1144,18 @@ def plot_isentropic_cross_section_figure(
         ax.set_ylabel(r"$\theta$ [K]")
         ax.set_title(title, fontsize=10, loc="left")
         ax.grid(True, color="0.78", linestyle="--", linewidth=0.45, alpha=0.6)
+        if cmap == "viridis":
+            ax.text(
+                0.02,
+                0.93,
+                "Light gray: PV < 0.25 PVU or unavailable",
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=8,
+                color="#374151",
+                bbox={"facecolor": "white", "alpha": 0.78, "edgecolor": "none", "pad": 1.5},
+            )
         colorbar = fig.colorbar(fill, ax=ax, orientation="horizontal", pad=0.10, aspect=45)
         colorbar.set_label(cbar_label)
 
