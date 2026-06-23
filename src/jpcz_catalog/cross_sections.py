@@ -930,15 +930,15 @@ def plot_pressure_cross_section_figure(
     zonal_wind_section: xr.DataArray | None = None,
 ) -> plt.Figure:
     """Create the stacked pressure-coordinate section figure."""
-    fig = plt.figure(figsize=(13.2, 16.8))
+    fig = plt.figure(figsize=(13.2, 18.4))
     # Reserve a dedicated row for each horizontal colorbar so the panel x-axes stay readable.
     grid = fig.add_gridspec(
         8,
         1,
-        height_ratios=[1.0, 0.14, 1.0, 0.14, 1.0, 0.14, 1.0, 0.18],
-        hspace=0.34,
+        height_ratios=[1.0, 0.16, 1.0, 0.16, 1.0, 0.16, 1.0, 0.20],
+        hspace=0.42,
     )
-    fig.subplots_adjust(top=0.92, bottom=0.11, left=0.09, right=0.92)
+    fig.subplots_adjust(top=0.87, bottom=0.09, left=0.09, right=0.92)
     top_axis = fig.add_subplot(grid[0, 0])
     middle_axis = fig.add_subplot(grid[2, 0], sharex=top_axis)
     lower_axis = fig.add_subplot(grid[4, 0], sharex=top_axis)
@@ -959,7 +959,7 @@ def plot_pressure_cross_section_figure(
         cmap="RdBu_r",
         levels=DEFAULT_OMEGA_LEVELS_PA_S,
         colorbar_label="Omega [Pa s$^{-1}$] (negative = ascent)",
-        title=f"Jet-normal pressure section: omega shading (negative = ascent), theta contours, and total along-section wind + reduced-scale omega {wind_label}",
+        title=f"Omega section: omega shading (negative = ascent), theta contours, and along-section wind + reduced-scale omega {wind_label}",
         theta_section=theta_section,
         along_wind_section=along_wind_section,
         omega_section=omega_section,
@@ -975,7 +975,7 @@ def plot_pressure_cross_section_figure(
         cmap="BrBG",
         levels=DEFAULT_MOISTURE_PROXY_LEVELS,
         colorbar_label="q × (-omega) [1e-3 Pa s$^{-1}$] (positive = moist ascent)",
-        title=f"Moist-ascent surrogate section: q × (-omega) shading (positive = moist ascent) with theta and total along-section wind + reduced-scale omega {wind_label}",
+        title=f"Moist-ascent section: q × (-omega) shading (positive = moist ascent), theta, and along-section wind + reduced-scale omega {wind_label}",
         theta_section=theta_section,
         along_wind_section=along_wind_section,
         omega_section=omega_section,
@@ -991,7 +991,7 @@ def plot_pressure_cross_section_figure(
         cmap="viridis",
         levels=DEFAULT_PV_LEVELS_PVU,
         colorbar_label="Potential vorticity [PVU]",
-        title=f"PV-focused section: PV shading, theta contours, total along-section wind + reduced-scale omega {wind_label}, and the 2-PVU line",
+        title=f"PV section: PV shading, theta contours, along-section wind + reduced-scale omega {wind_label}, and the 2-PVU line",
         theta_section=theta_section,
         along_wind_section=along_wind_section,
         omega_section=omega_section,
@@ -1067,21 +1067,20 @@ def plot_pressure_cross_section_figure(
     fig.suptitle(
         f"Cross sections | {group_id} | {time_role} | {analysis_time:%Y-%m-%d %H:%M UTC}",
         fontsize=13,
-        y=0.98,
+        y=0.985,
     )
-    _annotate_section_endpoint_banner(fig, transect, y=0.942)
+    _annotate_section_endpoint_banner(fig, transect, y=0.966)
     fig.text(
         0.5,
-        0.955,
+        0.946,
         (
             f"{'Wind barbs' if str(wind_render_mode).lower() == 'barbs' else 'Vectors'} show the horizontal wind projected "
-            f"onto the transect direction, paired with omega × {OMEGA_VECTOR_SCALE:.0f} for visibility in the upper three panels "
-            "(negative omega = ascent); the moist-ascent proxy uses q × (-omega), so positive values mark moist ascent; "
-            "the bottom panel adds black theta contours and signed zonal isotachs (blue westerly, orange easterly)."
+            f"onto the transect direction, paired with omega × {OMEGA_VECTOR_SCALE:.0f} for visibility in the upper three panels.\n"
+            "Negative omega = ascent; positive q × (-omega) = moist ascent; the bottom panel adds black theta contours and signed zonal isotachs."
         ),
         ha="center",
         va="top",
-        fontsize=9,
+        fontsize=8.8,
         color="#374151",
     )
     return fig
