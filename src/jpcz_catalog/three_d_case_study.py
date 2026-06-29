@@ -1,4 +1,4 @@
-"""3-D single-event case-study helpers for Notebook 27."""
+"""3-D single-event case-study helpers for the preserved prototype notebook."""
 
 from __future__ import annotations
 

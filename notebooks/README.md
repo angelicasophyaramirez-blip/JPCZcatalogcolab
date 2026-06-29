@@ -30,7 +30,8 @@ Planned order:
 24. `24_objective_regime_manual_verification_atlas.ipynb`
 25. `25_continuous_spell_evolution_and_onset_timing.ipynb`
 26. `26_timing_group_manual_verification_atlas.ipynb`
-27. `27_single_event_3d_case_study.ipynb`
+27. `27_eawm_aware_timing_group_review_dashboard.ipynb`
+28. `28_single_event_3d_case_study.ipynb`
 
 Design rule:
 
@@ -60,4 +61,5 @@ Design rule:
 - Notebook 24 is the manual-review atlas for the new workflow, tying objective labels and spell timing to moisture, divergence, quicklook, OLR, and satellite context
 - Notebook 25 builds broader catalog spells first, checkpoints reusable continuous spell means, and then applies the candidate threshold profiles through time so offshore/coastal evolution can be tracked beyond event peaks
 - Notebook 26 is the timing-group manual-review atlas, including synoptic funnel diagnostics and cross-section setup / rendering
-- Notebook 27 is reserved for a single-event 3-D case-study prototype that links terrain, jet structure, low-level convergence, moisture proxy layers, and one diagnostic slice
+- Notebook 27 is the EAWM-aware timing-group review dashboard, extending Notebook 26 with dedicated EAWM labeling controls and anomaly-based review panels
+- Notebook 28 preserves the earlier single-event 3-D case-study prototype that links terrain, jet structure, low-level convergence, moisture proxy layers, and one diagnostic slice
