@@ -32,6 +32,7 @@ Planned order:
 26. `26_timing_group_manual_verification_atlas.ipynb`
 27. `27_eawm_aware_timing_group_review_dashboard.ipynb`
 28. `28_single_event_3d_case_study.ipynb`
+29. `29_clearer_yamazaki_blocking_process.ipynb`
 
 Design rule:
 
@@ -63,3 +64,4 @@ Design rule:
 - Notebook 26 is the timing-group manual-review atlas, including synoptic funnel diagnostics and cross-section setup / rendering
 - Notebook 27 is the EAWM-aware timing-group review dashboard, extending Notebook 26 with dedicated EAWM labeling controls and anomaly-based review panels
 - Notebook 28 preserves the earlier single-event 3-D case-study prototype that links terrain, jet structure, low-level convergence, moisture proxy layers, and one diagnostic slice
+- Notebook 29 is the clearer Yamazaki-style blocking-process notebook, separating the upper ridge, jet circulation, cold-air flux, SLP anomalies, H/L centers, and 850 hPa thermal response for the February 2018 case study
