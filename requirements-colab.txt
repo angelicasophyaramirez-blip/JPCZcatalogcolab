@@ -12,3 +12,5 @@ regionmask
 metpy
 cartopy
 plotly
+earthaccess
+h5py
