@@ -96,6 +96,8 @@ def compute_divergence_stack(
     v_name: str = "v_component_of_wind",
     dx=None,
     dy=None,
+    progress_every: int | None = None,
+    progress_label: str = "Divergence",
 ) -> xr.DataArray:
     """Compute hourly 925 hPa divergence over a time window."""
     if dx is None or dy is None:
@@ -112,6 +114,10 @@ def compute_divergence_stack(
                 dy=dy,
             ).values
         )
+        if progress_every and (
+            (i + 1) % progress_every == 0 or (i + 1) == window_ds.sizes["time"]
+        ):
+            print(f"{progress_label}: divergence {i + 1}/{window_ds.sizes['time']} hours")
 
     return xr.DataArray(
         np.stack(divergence_stack, axis=0),
@@ -147,6 +153,8 @@ def compute_polygon_mean_divergence_series(
     polygon_vertices: Sequence[tuple[float, float]] | None = None,
     *,
     geometry: DetectionGeometry | None = None,
+    progress_every: int | None = None,
+    progress_label: str = "Divergence",
 ) -> tuple[xr.DataArray, xr.DataArray, xr.DataArray]:
     """Compute hourly polygon-mean divergence and Shinoda-style 12-hour mean D."""
     loaded = window_ds.load()
@@ -159,7 +167,13 @@ def compute_polygon_mean_divergence_series(
             polygon_vertices,
         )
 
-    div_925 = compute_divergence_stack(loaded, dx=geometry.dx, dy=geometry.dy)
+    div_925 = compute_divergence_stack(
+        loaded,
+        dx=geometry.dx,
+        dy=geometry.dy,
+        progress_every=progress_every,
+        progress_label=progress_label,
+    )
     polygon_mask = geometry.polygon_mask
     weights = geometry.weights
 
