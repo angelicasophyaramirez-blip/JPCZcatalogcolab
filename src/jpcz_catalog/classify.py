@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import calendar
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -86,15 +87,67 @@ def annotate_events_with_environment(
     seoul: GeographicPoint = SEOUL,
     sapporo: GeographicPoint = SAPPORO,
     window_hours: int = 12,
+    checkpoint_path: str | Path | None = None,
+    checkpoint_every: int | None = None,
+    progress_label: str = "Event environment",
 ) -> pd.DataFrame:
-    """Attach 12-hour SLP-difference and vorticity metrics to each event."""
+    """Attach 12-hour SLP-difference and vorticity metrics to each event.
+
+    When ``checkpoint_path`` is supplied, completed event metrics are written
+    to a compact CSV checkpoint and reused by event peak time on the next run.
+    This makes a long Colab classification step safe to resume after a
+    disconnect without changing the resulting catalog calculations.
+    """
     classified_events = events_df.copy()
     classified_events["event_peak"] = pd.to_datetime(classified_events["event_peak"])
 
+    if checkpoint_every is not None and checkpoint_every < 1:
+        raise ValueError("checkpoint_every must be at least 1 when supplied.")
+
+    checkpoint_file = Path(checkpoint_path) if checkpoint_path is not None else None
+    cached_metrics: dict[pd.Timestamp, tuple[float, float]] = {}
+    if checkpoint_file is not None and checkpoint_file.exists():
+        checkpoint_df = pd.read_csv(checkpoint_file, parse_dates=["event_peak"])
+        required_columns = {"event_peak", "slp_diff_hpa", "zeta_box_mean_s-1"}
+        if required_columns.issubset(checkpoint_df.columns):
+            for _, row in checkpoint_df.iterrows():
+                if pd.notna(row["slp_diff_hpa"]) and pd.notna(row["zeta_box_mean_s-1"]):
+                    cached_metrics[pd.Timestamp(row["event_peak"])] = (
+                        float(row["slp_diff_hpa"]),
+                        float(row["zeta_box_mean_s-1"]),
+                    )
+            print(f"{progress_label}: resuming {len(cached_metrics)} cached event metrics.")
+
+    def write_checkpoint() -> None:
+        if checkpoint_file is None:
+            return
+        checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_df = pd.DataFrame(
+            [
+                {
+                    "event_peak": peak_time,
+                    "slp_diff_hpa": slp_diff_hpa,
+                    "zeta_box_mean_s-1": zeta_box_mean_s_1,
+                }
+                for peak_time, (slp_diff_hpa, zeta_box_mean_s_1) in cached_metrics.items()
+            ]
+        ).sort_values("event_peak")
+        temporary_path = checkpoint_file.with_suffix(checkpoint_file.suffix + ".tmp")
+        checkpoint_df.to_csv(temporary_path, index=False)
+        temporary_path.replace(checkpoint_file)
+
     slp_diff_values: list[float] = []
     zeta_values: list[float] = []
+    newly_calculated = 0
 
-    for peak_time in classified_events["event_peak"]:
+    for event_number, peak_time in enumerate(classified_events["event_peak"], start=1):
+        peak_time = pd.Timestamp(peak_time)
+        if peak_time in cached_metrics:
+            slp_diff_hpa, zeta_box_mean_s_1 = cached_metrics[peak_time]
+            slp_diff_values.append(slp_diff_hpa)
+            zeta_values.append(zeta_box_mean_s_1)
+            continue
+
         start_time = peak_time - pd.Timedelta(hours=window_hours - 1)
         end_time = peak_time
 
@@ -118,11 +171,23 @@ def annotate_events_with_environment(
         msl_12h = event_window["mean_sea_level_pressure"].mean("time")
         seoul_msl = float(nearest_point(msl_12h, seoul).values) / 100.0
         sapporo_msl = float(nearest_point(msl_12h, sapporo).values) / 100.0
-        slp_diff_values.append(seoul_msl - sapporo_msl)
+        slp_diff_hpa = seoul_msl - sapporo_msl
 
         uv_12h = event_window[["u_component_of_wind", "v_component_of_wind"]].mean("time")
-        zeta_values.append(compute_vorticity_box_mean(uv_12h, box=box))
+        zeta_box_mean_s_1 = compute_vorticity_box_mean(uv_12h, box=box)
+        cached_metrics[peak_time] = (slp_diff_hpa, zeta_box_mean_s_1)
+        slp_diff_values.append(slp_diff_hpa)
+        zeta_values.append(zeta_box_mean_s_1)
+        newly_calculated += 1
 
+        if checkpoint_every is not None and newly_calculated % checkpoint_every == 0:
+            write_checkpoint()
+            print(
+                f"{progress_label}: checkpointed {event_number}/{len(classified_events)} events "
+                f"({len(cached_metrics)} total saved)."
+            )
+
+    write_checkpoint()
     classified_events["slp_diff_hpa"] = slp_diff_values
     classified_events["zeta_box_mean_s-1"] = zeta_values
     return classified_events
