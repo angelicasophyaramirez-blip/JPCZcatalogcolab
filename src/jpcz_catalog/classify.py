@@ -228,11 +228,21 @@ def compute_month_climatological_slp_index(
     years: Iterable[int] = DECEMBER_BENCHMARK_YEARS,
     seoul: GeographicPoint = SEOUL,
     sapporo: GeographicPoint = SAPPORO,
+    progress_every: int | None = None,
+    progress_label: str = "SLP climatology",
 ) -> tuple[xr.DataArray, float, float]:
-    """Compute the 12-hour Seoul-minus-Sapporo climatological index for one month."""
-    monthly_slp_index_series = []
+    """Compute the 12-hour Seoul-minus-Sapporo climatological index for one month.
 
-    for year in years:
+    Set ``progress_every`` to print cloud-calculation status after that many
+    calendar years have been loaded.
+    """
+    monthly_slp_index_series = []
+    years = tuple(years)
+
+    if progress_every is not None and progress_every < 1:
+        raise ValueError("progress_every must be at least 1 when supplied.")
+
+    for index, year in enumerate(years, start=1):
         last_day = calendar.monthrange(year, month)[1]
         msl_month = ds["mean_sea_level_pressure"].sel(
             time=slice(f"{year}-{month:02d}-01", f"{year}-{month:02d}-{last_day:02d}T23:00:00")
@@ -244,6 +254,8 @@ def compute_month_climatological_slp_index(
         slp_diff_hourly = (seoul_da - sapporo_da).rename("slp_diff_hpa")
         slp_diff_12h = slp_diff_hourly.rolling(time=12, min_periods=12).mean().dropna("time").load()
         monthly_slp_index_series.append(slp_diff_12h)
+        if progress_every and (index % progress_every == 0 or index == len(years)):
+            print(f"{progress_label}: {index}/{len(years)} years complete")
 
     all_month_slp_index = xr.concat(monthly_slp_index_series, dim="time").sortby("time")
     mean_value = float(all_month_slp_index.mean().values)
