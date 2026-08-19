@@ -168,7 +168,7 @@ def association_statistics(
     region: str,
     measure: str,
 ) -> dict[str, object]:
-    """Return Pearson and OLS summary statistics for one requested comparison."""
+    """Return descriptive, Pearson, and OLS diagnostics for one comparison."""
     if x_column not in frame or y_column not in frame:
         return {"region": region, "precipitation_measure": measure, "n": 0, "status": "data unavailable"}
     sample = frame[[x_column, y_column]].dropna()
@@ -178,26 +178,58 @@ def association_statistics(
 
     from scipy import stats
 
-    correlation = stats.pearsonr(sample[x_column], sample[y_column])
-    regression = stats.linregress(sample[x_column], sample[y_column])
+    x = sample[x_column].to_numpy(dtype=float)
+    y = sample[y_column].to_numpy(dtype=float)
+    correlation = stats.pearsonr(x, y)
+    regression = stats.linregress(x, y)
+    x_mean, y_mean = float(np.mean(x)), float(np.mean(y))
+    x_sd, y_sd = float(np.std(x, ddof=1)), float(np.std(y, ddof=1))
+    fitted = regression.intercept + regression.slope * x
+    residuals = y - fitted
+    sse = float(np.sum(residuals**2))
+    regression_df = n - 2
+    residual_standard_error = float(np.sqrt(sse / regression_df))
+    rmse = float(np.sqrt(np.mean(residuals**2)))
+    x_centered_sum_squares = float(np.sum((x - x_mean) ** 2))
+    intercept_standard_error = float(
+        residual_standard_error * np.sqrt(1 / n + x_mean**2 / x_centered_sum_squares)
+    )
     fisher_z = np.arctanh(correlation.statistic)
-    r_margin = stats.norm.ppf(0.975) / np.sqrt(n - 3)
+    fisher_z_standard_error = 1 / np.sqrt(n - 3)
+    r_margin = stats.norm.ppf(0.975) * fisher_z_standard_error
     r_ci_low, r_ci_high = np.tanh([fisher_z - r_margin, fisher_z + r_margin])
-    slope_margin = stats.t.ppf(0.975, n - 2) * regression.stderr
+    slope_t_critical_95 = stats.t.ppf(0.975, regression_df)
+    slope_margin = slope_t_critical_95 * regression.stderr
     return {
         "region": region,
         "precipitation_measure": measure,
+        "predictor_column": x_column,
+        "response_column": y_column,
         "n": n,
         "status": "ok",
+        "x_mean": x_mean,
+        "x_sample_sd": x_sd,
+        "y_mean": y_mean,
+        "y_sample_sd": y_sd,
         "pearson_r": correlation.statistic,
+        "r_ci_method": "Fisher z; SE_z = 1/sqrt(n - 3)",
+        "r_fisher_z": fisher_z,
+        "r_fisher_z_standard_error": fisher_z_standard_error,
         "r_95ci_low": r_ci_low,
         "r_95ci_high": r_ci_high,
         "r_two_sided_p": correlation.pvalue,
         "slope": regression.slope,
+        "slope_standard_error": regression.stderr,
+        "slope_t_critical_95": slope_t_critical_95,
         "slope_95ci_low": regression.slope - slope_margin,
         "slope_95ci_high": regression.slope + slope_margin,
         "slope_two_sided_p": regression.pvalue,
         "intercept": regression.intercept,
+        "intercept_standard_error": intercept_standard_error,
         "r_squared": regression.rvalue**2,
-        "null_decision_alpha_0.05": "reject H0" if correlation.pvalue < 0.05 else "fail to reject H0",
+        "residual_sum_squares": sse,
+        "residual_standard_error": residual_standard_error,
+        "rmse": rmse,
+        "regression_df": regression_df,
+        "evidence_for_nonzero_association_alpha_0.05": "yes" if correlation.pvalue < 0.05 else "no",
     }
