@@ -10,6 +10,10 @@ import pandas as pd
 
 # NASA's current V07B archive extends into the TRMM era from January 1998.
 IMERG_FIRST_VALID_TIME = pd.Timestamp("1998-01-01 00:00:00")
+# GPM_3IMERGHH V07 Final is presently archived through September 2025. Keep
+# this separate from the catalog time range: an event may be a valid ERA5 JPCZ
+# event but unavailable for a Final-V07 precipitation comparison.
+IMERG_FINAL_V07_END_EXCLUSIVE = pd.Timestamp("2025-10-01 00:00:00")
 
 
 def atomic_csv(frame: pd.DataFrame, path: str | Path) -> None:
@@ -78,7 +82,7 @@ def write_event_plan(
     *,
     path: str | Path,
 ) -> pd.DataFrame:
-    """Save the complete request inventory and its current completion status."""
+    """Save the Final-V07 request inventory and transparent completion status."""
     complete = completed_event_ids(event_metrics)
     columns = [
         "event_id",
@@ -93,7 +97,22 @@ def write_event_plan(
     ]
     plan = events[columns].copy()
     plan["imerg_product"] = "GPM_3IMERGHH V07 Final / Grid/precipitation (legacy fallback: precipitationCal)"
-    plan["collection_status"] = np.where(plan["event_id"].isin(complete), "complete", "pending")
+    plan["final_v07_availability"] = np.where(
+        plan["precip_window_end_exclusive"] <= IMERG_FINAL_V07_END_EXCLUSIVE,
+        "available",
+        "not_available_final_v07",
+    )
+    plan["analysis_inclusion"] = np.where(
+        plan["final_v07_availability"].eq("available"), "include", "exclude"
+    )
+    plan["collection_status"] = np.select(
+        [
+            plan["final_v07_availability"].eq("not_available_final_v07"),
+            plan["event_id"].isin(complete),
+        ],
+        ["not_available_final_v07", "complete"],
+        default="pending",
+    )
     atomic_csv(plan, path)
     return plan
 
