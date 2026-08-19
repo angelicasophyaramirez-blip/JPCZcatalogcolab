@@ -33,7 +33,9 @@ Planned order:
 27. `27_eawm_aware_timing_group_review_dashboard.ipynb`
 28. `28_single_event_3d_case_study.ipynb`
 29. `29_clearer_yamazaki_blocking_process.ipynb`
-30. `30_imerg_precipitation_convergence_association.ipynb`
+30. `30_imerg_precipitation_convergence_association.ipynb` — catalog plan and Earthdata login
+31. `31_imerg_event_collection.ipynb` — resumable IMERG event collection
+32. `32_imerg_association_statistics.ipynb` — final statistics and figures
 
 Design rule:
 
@@ -66,4 +68,6 @@ Design rule:
 - Notebook 27 is the EAWM-aware timing-group review dashboard, extending Notebook 26 with dedicated EAWM labeling controls and anomaly-based review panels
 - Notebook 28 preserves the earlier single-event 3-D case-study prototype that links terrain, jet structure, low-level convergence, moisture proxy layers, and one diagnostic slice
 - Notebook 29 is the clearer Yamazaki-style blocking-process notebook, separating the upper ridge, jet circulation, cold-air flux, SLP anomalies, H/L centers, and 850 hPa thermal response for the February 2018 case study
-- Notebook 30 pairs the merged JPCZ catalog with GPM IMERG Final V07 precipitation, saves resumable IMERG and ERA5 regional time-series checkpoints to Google Drive, and tests regional precipitation–convergence associations
+- Notebook 30 creates the expanded-catalog IMERG request inventory in Drive and provides an explicit Earthdata-login stage; it does not recalculate ERA5 divergence.
+- Notebook 31 performs the only external retrieval: it reduces IMERG Final V07 granules to compact Shinoda-polygon and coastal-wedge regional rate series, checkpoints after each event, and records attempts and completion status in Drive.
+- Notebook 32 reads only the backed-up Drive tables, requires a complete event inventory by default, and creates the four precipitation–convergence panels plus the correlation/regression table.
