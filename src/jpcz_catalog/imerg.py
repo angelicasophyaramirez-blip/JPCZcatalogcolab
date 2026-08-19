@@ -1,6 +1,6 @@
 """Small, reproducible helpers for GPM IMERG Final half-hourly data.
 
-The IMERG HDF5 layout stores ``Grid/precipitationCal`` as
+The IMERG HDF5 layout stores its V07 precipitation field as
 ``(time, longitude, latitude)``.  These helpers deliberately read only a
 small requested spatial subset before transposing it to the conventional
 ``(latitude, longitude)`` analysis layout used elsewhere in this project.
@@ -19,7 +19,12 @@ from .config import BoundingBox
 from .masks import build_coslat_weights, build_polygon_mask
 
 
-IMERG_PRECIPITATION_CAL_PATH = "Grid/precipitationCal"
+# V07 documents the half-hour field as ``precipitation``.  Keep the older
+# calibrated-field name as a fallback for legacy archive granules.
+IMERG_PRECIPITATION_PATHS = (
+    "Grid/precipitation",
+    "Grid/precipitationCal",
+)
 IMERG_LATITUDE_PATH = "Grid/lat"
 IMERG_LONGITUDE_PATH = "Grid/lon"
 
@@ -50,7 +55,7 @@ def read_precipitation_cal_subset(
     *,
     domain: BoundingBox,
 ) -> xr.DataArray:
-    """Read one IMERG ``precipitationCal`` field over a small lat/lon domain.
+    """Read one IMERG V07 precipitation field over a small lat/lon domain.
 
     The returned field is in mm h^-1 and has dimensions ``latitude`` then
     ``longitude``.  Negative fill values are converted to NaN.
@@ -63,7 +68,16 @@ def read_precipitation_cal_subset(
         lon_slice = _contiguous_slice(longitudes, domain.lon_min, domain.lon_max)
         lat_slice = _contiguous_slice(latitudes, domain.lat_min, domain.lat_max)
 
-        dataset = handle[IMERG_PRECIPITATION_CAL_PATH]
+        dataset_path = next(
+            (candidate for candidate in IMERG_PRECIPITATION_PATHS if candidate in handle),
+            None,
+        )
+        if dataset_path is None:
+            raise KeyError(
+                "No supported IMERG precipitation field found. Expected one of "
+                f"{IMERG_PRECIPITATION_PATHS}; available groups: {list(handle.keys())}."
+            )
+        dataset = handle[dataset_path]
         fill_value = float(dataset.attrs.get("_FillValue", -9999.9))
         # Native IMERG order is (time, longitude, latitude), with one time
         # element per granule.  Transpose to the project-wide lat/lon order.
@@ -78,7 +92,7 @@ def read_precipitation_cal_subset(
         },
         dims=("latitude", "longitude"),
         name="imerg_precipitation_rate",
-        attrs={"units": "mm h^-1", "source_variable": IMERG_PRECIPITATION_CAL_PATH},
+        attrs={"units": "mm h^-1", "source_variable": dataset_path},
     )
 
 

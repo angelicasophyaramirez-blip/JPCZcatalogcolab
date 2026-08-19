@@ -6,10 +6,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 
 
-IMERG_FIRST_VALID_TIME = pd.Timestamp("2000-06-01 00:00:00")
+# NASA's current V07B archive extends into the TRMM era from January 1998.
+IMERG_FIRST_VALID_TIME = pd.Timestamp("1998-01-01 00:00:00")
 
 
 def atomic_csv(frame: pd.DataFrame, path: str | Path) -> None:
@@ -92,7 +92,7 @@ def write_event_plan(
         "jpcz_polygon_convergence_1e5_s-1",
     ]
     plan = events[columns].copy()
-    plan["imerg_product"] = "GPM_3IMERGHH V07 Final / Grid/precipitationCal"
+    plan["imerg_product"] = "GPM_3IMERGHH V07 Final / Grid/precipitation (legacy fallback: precipitationCal)"
     plan["collection_status"] = np.where(plan["event_id"].isin(complete), "complete", "pending")
     atomic_csv(plan, path)
     return plan
@@ -156,6 +156,8 @@ def association_statistics(
     n = len(sample)
     if n < 4:
         return {"region": region, "precipitation_measure": measure, "n": n, "status": "need at least four complete events"}
+
+    from scipy import stats
 
     correlation = stats.pearsonr(sample[x_column], sample[y_column])
     regression = stats.linregress(sample[x_column], sample[y_column])
