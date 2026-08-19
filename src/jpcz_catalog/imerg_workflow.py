@@ -218,8 +218,11 @@ def association_statistics(
     y_column: str,
     region: str,
     measure: str,
+    confidence_level: float = 0.95,
 ) -> dict[str, object]:
     """Return descriptive, Pearson, and OLS diagnostics for one comparison."""
+    if not 0 < confidence_level < 1:
+        raise ValueError("confidence_level must be between zero and one.")
     if x_column not in frame or y_column not in frame:
         return {"region": region, "precipitation_measure": measure, "n": 0, "status": "data unavailable"}
     sample = frame[[x_column, y_column]].dropna()
@@ -247,9 +250,10 @@ def association_statistics(
     )
     fisher_z = np.arctanh(correlation.statistic)
     fisher_z_standard_error = 1 / np.sqrt(n - 3)
-    r_margin = stats.norm.ppf(0.975) * fisher_z_standard_error
+    alpha = 1 - confidence_level
+    r_margin = stats.norm.ppf(1 - alpha / 2) * fisher_z_standard_error
     r_ci_low, r_ci_high = np.tanh([fisher_z - r_margin, fisher_z + r_margin])
-    slope_t_critical_95 = stats.t.ppf(0.975, regression_df)
+    slope_t_critical_95 = stats.t.ppf(1 - alpha / 2, regression_df)
     slope_margin = slope_t_critical_95 * regression.stderr
     return {
         "region": region,
@@ -258,6 +262,8 @@ def association_statistics(
         "response_column": y_column,
         "n": n,
         "status": "ok",
+        "confidence_level": confidence_level,
+        "alpha": alpha,
         "x_mean": x_mean,
         "x_sample_sd": x_sd,
         "y_mean": y_mean,
