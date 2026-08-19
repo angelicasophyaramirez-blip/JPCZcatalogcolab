@@ -160,6 +160,57 @@ def event_precipitation_metrics(
     return row
 
 
+def fixed_peak_12h_precipitation_metrics(
+    events: pd.DataFrame,
+    rates: pd.DataFrame,
+    *,
+    region_names: tuple[str, ...],
+    minimum_coverage: float,
+) -> pd.DataFrame:
+    """Calculate a fixed 12-hour IMERG accumulation matched to each D12 peak.
+
+    D12 at a peak uses the 12 hourly timestamps from peak - 11 hours through
+    peak. The equivalent half-hourly IMERG window has 24 samples beginning at
+    peak - 11 hours and ending one hour after the peak timestamp (exclusive).
+    This window is fully contained in the existing event collection window.
+    """
+    indexed = rates.set_index("time").sort_index() if "time" in rates else pd.DataFrame(index=pd.DatetimeIndex([]))
+    rows: list[dict[str, object]] = []
+    for event in events.itertuples(index=False):
+        start = pd.Timestamp(event.event_peak) - pd.Timedelta(hours=11)
+        end_exclusive = pd.Timestamp(event.event_peak) + pd.Timedelta(hours=1)
+        expected = pd.date_range(start, end_exclusive, freq="30min", inclusive="left")
+        window = indexed.reindex(expected)
+        row: dict[str, object] = {
+            "event_id": event.event_id,
+            "event_peak": event.event_peak,
+            "fixed12_window_start": start,
+            "fixed12_window_end_exclusive": end_exclusive,
+            "fixed12_expected_halfhours": len(expected),
+            "fixed12_window_hours": len(expected) * 0.5,
+        }
+        complete = True
+        for region in region_names:
+            column = f"{region}_rate_mm_hr"
+            valid = int(window[column].notna().sum()) if column in window else 0
+            coverage = valid / len(expected)
+            accumulation = (
+                window[column].sum(skipna=True) * 0.5
+                if coverage >= minimum_coverage and column in window
+                else np.nan
+            )
+            row[f"{region}_fixed12_imerg_valid_halfhours"] = valid
+            row[f"{region}_fixed12_imerg_coverage_fraction"] = coverage
+            row[f"{region}_fixed12_imerg_accumulation_mm"] = accumulation
+            row[f"{region}_fixed12_imerg_mean_rate_mm_hr"] = (
+                accumulation / 12 if pd.notna(accumulation) else np.nan
+            )
+            complete = complete and pd.notna(accumulation)
+        row["fixed12_status"] = "ok" if complete else "incomplete"
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def association_statistics(
     frame: pd.DataFrame,
     *,
