@@ -36,6 +36,7 @@ Planned order:
 30. `30_imerg_precipitation_convergence_association.ipynb` — catalog plan and Earthdata login
 31. `31_imerg_event_collection.ipynb` — resumable IMERG event collection
 32. `32_imerg_association_statistics.ipynb` — final statistics and figures
+33. `33_ndjf_climatological_context_concept.ipynb` — resumable NDJF pressure, wind, SST, temperature, and terrain context figures
 
 Design rule:
 
@@ -71,3 +72,4 @@ Design rule:
 - Notebook 30 creates the expanded-catalog IMERG request inventory in Drive and provides an explicit Earthdata-login stage; it does not recalculate ERA5 divergence.
 - Notebook 31 performs the only external retrieval: it reduces IMERG Final V07 granules to compact Shinoda-polygon and coastal-wedge regional rate series, checkpoints after each event, and records attempts and completion status in Drive.
 - Notebook 32 reads only the backed-up Drive tables, requires a complete event inventory by default, and creates the four precipitation–convergence panels plus the correlation/regression table.
+- Notebook 33 creates seasonal-background (not event-composite) figures: a broad NDJF MSLP/925-hPa wind map with objectively located Siberian High and Aleutian Low centers, and a wider regional terrain/SST/2-m-temperature/925-hPa-wind map. It saves one Drive checkpoint for each NDJF calendar month so interrupted runs resume safely.
