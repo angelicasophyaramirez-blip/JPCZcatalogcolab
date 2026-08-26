@@ -15,6 +15,7 @@ from pathlib import Path
 import gc
 import math
 import shutil
+import time
 import urllib.request
 
 import numpy as np
@@ -70,27 +71,40 @@ def _atomic_netcdf(dataset: xr.Dataset, destination: Path, local_work_dir: Path)
     temporary_path.unlink(missing_ok=True)
 
 
-def _load_checkpoint(path: Path) -> xr.Dataset | None:
-    if not path.exists():
-        return None
+def _load_checkpoint(path: Path, *, attempts: int = 5, retry_seconds: int = 5) -> xr.Dataset | None:
+    """Load a Drive checkpoint, allowing time for a just-copied file to sync."""
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        if path.exists():
+            try:
+                return xr.open_dataset(path).load()
+            except Exception as exc:  # A partial Drive file should be rebuilt, not trusted.
+                last_error = exc
+        if attempt < attempts:
+            print(f"  waiting for Drive checkpoint {path.name} ({attempt}/{attempts})…")
+            time.sleep(retry_seconds)
+    if last_error is not None:
+        print(f"Ignoring unreadable checkpoint {path.name}: {type(last_error).__name__}: {last_error}")
+    return None
 
 
-def _checkpoint_is_readable(path: Path) -> bool:
+def _checkpoint_is_readable(path: Path, *, attempts: int = 5, retry_seconds: int = 5) -> bool:
     """Check a Drive checkpoint without retaining its gridded fields in RAM."""
-    if not path.exists():
-        return False
-    try:
-        with xr.open_dataset(path) as checkpoint:
-            required = {"mslp_hpa", "u925_ms", "v925_ms", "t2m_c", "sst_c"}
-            return required.issubset(checkpoint.data_vars) and int(checkpoint.attrs.get("sample_count_hours", 0)) > 0
-    except Exception as exc:  # A partial Drive file should be rebuilt, not trusted.
-        print(f"Ignoring unreadable checkpoint {path.name}: {type(exc).__name__}: {exc}")
-        return False
-    try:
-        return xr.open_dataset(path).load()
-    except Exception as exc:  # A partial Drive file should be rebuilt, not trusted.
-        print(f"Ignoring unreadable checkpoint {path.name}: {type(exc).__name__}: {exc}")
-        return None
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        if path.exists():
+            try:
+                with xr.open_dataset(path) as checkpoint:
+                    required = {"mslp_hpa", "u925_ms", "v925_ms", "t2m_c", "sst_c"}
+                    return required.issubset(checkpoint.data_vars) and int(checkpoint.attrs.get("sample_count_hours", 0)) > 0
+            except Exception as exc:  # A partial Drive file should be rebuilt, not trusted.
+                last_error = exc
+        if attempt < attempts:
+            print(f"  waiting for Drive checkpoint {path.name} ({attempt}/{attempts})…")
+            time.sleep(retry_seconds)
+    if last_error is not None:
+        print(f"Ignoring unreadable checkpoint {path.name}: {type(last_error).__name__}: {last_error}")
+    return False
 
 
 def _month_time_slices(month_start: pd.Timestamp, chunk_days: int):
