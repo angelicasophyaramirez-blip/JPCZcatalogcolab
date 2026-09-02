@@ -37,6 +37,7 @@ Planned order:
 31. `31_imerg_event_collection.ipynb` — resumable IMERG event collection
 32. `32_imerg_association_statistics.ipynb` — final statistics and figures
 33. `33_ndjf_climatological_context_concept.ipynb` — resumable NDJF pressure, wind, SST, temperature, and terrain context figures
+34. `34_historical_ndjf_catalog_1940_2026.ipynb` — separate, resumable full-record historical detector and comparison with the established merged catalog
 
 Design rule:
 
@@ -73,3 +74,4 @@ Design rule:
 - Notebook 31 performs the only external retrieval: it reduces IMERG Final V07 granules to compact Shinoda-polygon and coastal-wedge regional rate series, checkpoints after each event, and records attempts and completion status in Drive.
 - Notebook 32 reads only the backed-up Drive tables, requires a complete event inventory by default, and creates the four precipitation–convergence panels plus the correlation/regression table.
 - Notebook 33 creates seasonal-background (not event-composite) figures: a broad NDJF MSLP/925-hPa wind map with objectively located Siberian High and Aleutian Low centers, and a wider regional terrain/SST/2-m-temperature/925-hPa-wind map. It saves one Drive checkpoint for each NDJF calendar month so interrupted runs resume safely.
+- Notebook 34 preserves the 2000–2025 catalog, reuses its compatible monthly `D12` files read-only, calculates only missing monthly ERA5 divergence checkpoints for complete NDJF seasons 1940/41–2025/26, recomputes the full-record month-specific thresholds, and writes a temporal-overlap comparison of the two final merged catalogs.

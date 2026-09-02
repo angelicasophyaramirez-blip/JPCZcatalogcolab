@@ -27,6 +27,7 @@ The project starts by reproducing the Shinoda et al. December event-detection me
 ## Repository map
 
 - `docs/detector-spec.md`: event-definition and threshold rules
+- `docs/historical-catalog-extension.md`: separate full-record historical catalog, checkpointing, and comparison method
 - `docs/colab-workflow.md`: Colab-first architecture and cloud data workflow
 - `docs/validation-plan.md`: benchmark and validation plan
 - `docs/objective-subtype-design.md`: objective subtype and clustering design notes

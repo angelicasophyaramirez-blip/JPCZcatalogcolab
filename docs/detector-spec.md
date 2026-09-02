@@ -52,6 +52,29 @@ What we do to reproduce that logic in ERA5:
 
 So the workflow is Shinoda-style because the detection logic is preserved, while the gridded numerical implementation is ours.
 
+## Historical extension: separate full-record baseline
+
+The established 2000--2025 NDJF catalog is preserved as the catalog used for
+the Shinoda-period benchmark and IMERG work.  A separately versioned
+historical catalog uses the same detector on complete NDJF seasons from
+1940/41 through 2025/26.  It reuses matching saved 2000--2025 `D_12h`
+checkpoints read-only, calculates only missing historical months, and then
+recomputes each month-specific threshold from the *entire* historical sample.
+
+Thus the historical threshold is not an append to the current threshold:
+
+\[
+T_m^{\mathrm{historical}} = \overline{D_{12,m}}^{1940/41\text{--}2025/26}
+- 2\sigma_{D_{12,m}}^{1940/41\text{--}2025/26}.
+\]
+
+This can change the set of events identified within 2000--2025 in the new
+historical-baseline catalog, but it never changes the established catalog.
+The resulting merged episode files are compared by temporal overlap to report
+retained, established-only, and historical-only episodes.  The operational
+details and Drive checkpoint layout are recorded in
+[`historical-catalog-extension.md`](historical-catalog-extension.md).
+
 More explicitly:
 
 - at each hourly time step, compute a full gridded `925 hPa` divergence field

@@ -263,6 +263,56 @@ def compute_month_climatological_slp_index(
     return all_month_slp_index, mean_value, std_value
 
 
+def compute_slp_index_for_month_records(
+    ds: xr.Dataset,
+    records: Iterable[tuple[int, int]],
+    *,
+    seoul: GeographicPoint = SEOUL,
+    sapporo: GeographicPoint = SAPPORO,
+    progress_every: int | None = None,
+    progress_label: str = "SLP climatology",
+) -> tuple[xr.DataArray, float, float]:
+    """Compute a 12-hour Seoul-minus-Sapporo climatology for explicit months.
+
+    This is for season-aware runs, where (for example) a complete NDJF record
+    starts with November--December 1940 and ends with January--February 2026.
+    It avoids silently treating the partial January--February 1940 period as
+    part of that complete-season climatology.
+    """
+    records = tuple((int(year), int(month)) for year, month in records)
+    if not records:
+        raise ValueError("records must contain at least one (year, month) pair.")
+    if progress_every is not None and progress_every < 1:
+        raise ValueError("progress_every must be at least 1 when supplied.")
+
+    slp_series = []
+    for index, (year, month) in enumerate(records, start=1):
+        last_day = calendar.monthrange(year, month)[1]
+        msl_month = ds["mean_sea_level_pressure"].sel(
+            time=slice(f"{year}-{month:02d}-01", f"{year}-{month:02d}-{last_day:02d}T23:00:00")
+        )
+        seoul_da = nearest_point(msl_month, seoul) / 100.0
+        sapporo_da = nearest_point(msl_month, sapporo) / 100.0
+        slp_12h = (
+            (seoul_da - sapporo_da)
+            .rename("slp_diff_hpa")
+            .rolling(time=12, min_periods=12)
+            .mean()
+            .dropna("time")
+            .load()
+        )
+        slp_series.append(slp_12h)
+        if progress_every and (index % progress_every == 0 or index == len(records)):
+            print(f"{progress_label}: {index}/{len(records)} month records complete")
+
+    all_slp_index = xr.concat(slp_series, dim="time").sortby("time")
+    return (
+        all_slp_index,
+        float(all_slp_index.mean().values),
+        float(all_slp_index.std().values),
+    )
+
+
 def assign_shinoda_classes(
     events_df: pd.DataFrame,
     *,
