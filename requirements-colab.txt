@@ -1,4 +1,5 @@
 xarray
+cftime
 dask
 numpy
 pandas

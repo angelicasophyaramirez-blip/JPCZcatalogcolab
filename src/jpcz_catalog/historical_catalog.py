@@ -8,6 +8,7 @@ be reused as read-only inputs.
 
 from __future__ import annotations
 
+import calendar
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -83,6 +84,50 @@ def find_existing_checkpoint(
     return None
 
 
+def validate_d12_checkpoint(path: str | Path, record: NDJFMonth) -> tuple[bool, str]:
+    """Validate that a checkpoint has the expected month-long trailing-D12 series.
+
+    This checks the timestamp convention and the expected number of valid
+    values.  It cannot reconstruct the original polygon geometry from a
+    one-dimensional D12 file, so the workflow separately records that legacy
+    files are only reused when they came from the established matching ERA5
+    detector.
+    """
+    checkpoint = Path(path)
+    if not checkpoint.exists():
+        return False, "file missing"
+    try:
+        D = xr.open_dataarray(checkpoint)
+        if "time" not in D.dims:
+            return False, "missing time dimension"
+        timestamps = pd.DatetimeIndex(D.time.values)
+        expected_count = calendar.monthrange(record.year, record.month)[1] * 24 - 11
+        expected_start = pd.Timestamp(record.year, record.month, 1, 11)
+        expected_end = pd.Timestamp(
+            record.year,
+            record.month,
+            calendar.monthrange(record.year, record.month)[1],
+            23,
+        )
+        if len(timestamps) != expected_count:
+            return False, f"expected {expected_count} D12 values, found {len(timestamps)}"
+        if timestamps.empty or timestamps[0] != expected_start or timestamps[-1] != expected_end:
+            return False, "unexpected D12 time coverage"
+        if not timestamps.is_monotonic_increasing or timestamps.has_duplicates:
+            return False, "timestamps are not unique and increasing"
+        values = np.asarray(D.values)
+        if not np.isfinite(values).all():
+            return False, "contains non-finite D12 values"
+    except Exception as error:  # pragma: no cover - defensive Drive/file handling
+        return False, f"unreadable checkpoint: {type(error).__name__}: {error}"
+    finally:
+        try:
+            D.close()
+        except (NameError, AttributeError):
+            pass
+    return True, "valid"
+
+
 def write_inventory(
     records: Sequence[dict[str, object]], path: str | Path) -> pd.DataFrame:
     """Atomically persist the Drive-resume inventory and return it."""
@@ -126,18 +171,26 @@ def initialize_historical_inventory(
             legacy_monthly_dir=legacy_monthly_dir,
             legacy_december_dir=legacy_december_dir,
         )
-        if new_path.exists():
-            status, source, selected_path = "complete", "historical_checkpoint", new_path
-        elif legacy_path is not None:
-            status, source, selected_path = "complete", "reused_legacy_checkpoint", legacy_path
+        new_valid, new_validation = validate_d12_checkpoint(new_path, record)
+        legacy_valid = False
+        legacy_validation = "not checked"
+        if legacy_path is not None:
+            legacy_valid, legacy_validation = validate_d12_checkpoint(legacy_path, record)
+
+        if new_valid:
+            status, source, selected_path, validation = "complete", "historical_checkpoint", new_path, new_validation
+        elif legacy_valid:
+            status, source, selected_path, validation = "complete", "reused_legacy_checkpoint", legacy_path, legacy_validation
         else:
-            status, source, selected_path = "pending", "new_era5_calculation", new_path
+            reason = new_validation if new_path.exists() else legacy_validation
+            status, source, selected_path, validation = "pending", "new_era5_calculation", new_path, reason
         rows.append(
             {
                 **asdict(record),
                 "status": status,
                 "source": source,
                 "checkpoint_path": str(selected_path),
+                "checkpoint_validation": validation,
             }
         )
     return rows
@@ -280,7 +333,14 @@ def compare_merged_catalogs(
     new = historical_catalog.copy().reset_index(drop=True)
     for frame in (old, new):
         for column in required:
-            frame[column] = pd.to_datetime(frame[column])
+            try:
+                # Newer pandas defaults to one inferred format for the whole
+                # column; ``mixed`` keeps date-only and timestamp values safe.
+                frame[column] = pd.to_datetime(frame[column], format="mixed")
+            except (TypeError, ValueError):
+                # Retain compatibility with older pandas used by some Colab
+                # runtimes, where ``format='mixed'`` is unavailable.
+                frame[column] = pd.to_datetime(frame[column])
     old = old.sort_values("event_start").reset_index(drop=True)
     new = new.sort_values("event_start").reset_index(drop=True)
 
