@@ -9,6 +9,7 @@ be reused as read-only inputs.
 from __future__ import annotations
 
 import calendar
+import gc
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -19,7 +20,7 @@ import xarray as xr
 
 from .detect import (
     DetectionGeometry,
-    compute_divergence_stack,
+    compute_divergence_field,
     compute_rolling_mean,
     count_events_from_threshold,
     threshold_from_std,
@@ -201,40 +202,55 @@ def compute_polygon_mean_divergence_series_chunked(
     *,
     geometry: DetectionGeometry,
     chunk_hours: int = 48,
+    progress_every_hours: int = 24,
     progress_label: str = "Monthly divergence",
 ) -> tuple[xr.DataArray, xr.DataArray]:
-    """Calculate hourly polygon divergence in small, memory-safe time chunks.
+    """Calculate hourly polygon divergence with bounded Colab memory use.
 
-    Only each short wind-data chunk and its divergence stack are loaded.  The
-    small one-dimensional hourly polygon series is concatenated before the
-    12-hour rolling mean is calculated, so the D12 calculation remains
-    identical to a non-chunked monthly calculation.
+    A short wind-data chunk is loaded from ARCO, but each hourly divergence
+    field is immediately reduced to one polygon-mean scalar and discarded.
+    Therefore the function never retains a month-long 3-D divergence stack in
+    memory.  The scalar hourly values are concatenated before the 12-hour
+    rolling mean is calculated, so D12 remains identical to the original
+    detector calculation.
     """
     if chunk_hours < 1:
         raise ValueError("chunk_hours must be at least one hour")
+    if progress_every_hours < 1:
+        raise ValueError("progress_every_hours must be at least one hour")
     if "time" not in window_ds.dims:
         raise ValueError("window_ds must have a time dimension")
 
     n_hours = int(window_ds.sizes["time"])
-    hourly_chunks: list[xr.DataArray] = []
+    timestamps = np.asarray(window_ds.time.values)
+    hourly_values: list[float] = []
     for start in range(0, n_hours, chunk_hours):
         stop = min(start + chunk_hours, n_hours)
         chunk = window_ds.isel(time=slice(start, stop)).load()
-        divergence = compute_divergence_stack(
-            chunk,
-            dx=geometry.dx,
-            dy=geometry.dy,
-        )
-        hourly_chunk = (
-            (divergence * geometry.weights).sum(dim=("latitude", "longitude"))
-            / geometry.weights.sum(dim=("latitude", "longitude"))
-        ).rename("polygon_mean_divergence_925hpa")
-        hourly_chunk.attrs.update({"units": "s^-1", "display_units": "1e-5 s^-1"})
-        hourly_chunks.append(hourly_chunk)
-        print(f"{progress_label}: {stop}/{n_hours} hourly fields complete")
-        del divergence, chunk
+        for index in range(int(chunk.sizes["time"])):
+            divergence = compute_divergence_field(
+                chunk.isel(time=index),
+                dx=geometry.dx,
+                dy=geometry.dy,
+            )
+            polygon_mean = (
+                (divergence * geometry.weights).sum(dim=("latitude", "longitude"))
+                / geometry.weights.sum(dim=("latitude", "longitude"))
+            )
+            hourly_values.append(float(polygon_mean.values))
+            del divergence, polygon_mean
+        if stop % progress_every_hours == 0 or stop == n_hours:
+            print(f"{progress_label}: {stop}/{n_hours} hourly fields complete")
+        del chunk
+        gc.collect()
 
-    hourly = xr.concat(hourly_chunks, dim="time").sortby("time")
+    hourly = xr.DataArray(
+        np.asarray(hourly_values),
+        coords={"time": timestamps},
+        dims="time",
+        name="polygon_mean_divergence_925hpa",
+        attrs={"units": "s^-1", "display_units": "1e-5 s^-1"},
+    )
     D_12h = compute_rolling_mean(hourly, window=12, min_periods=12, name="D_12h")
     return hourly, D_12h
 
