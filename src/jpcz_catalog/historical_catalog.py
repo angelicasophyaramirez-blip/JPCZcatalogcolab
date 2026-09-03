@@ -17,10 +17,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import xarray as xr
+import metpy.calc as mpcalc
+from metpy.units import units
 
 from .detect import (
     DetectionGeometry,
-    compute_divergence_field,
     compute_rolling_mean,
     count_events_from_threshold,
     threshold_from_std,
@@ -151,6 +152,16 @@ def write_dataframe_atomic(frame: pd.DataFrame, path: str | Path, *, index: bool
     return destination
 
 
+def write_dataarray_atomic(array: xr.DataArray, path: str | Path) -> Path:
+    """Atomically persist a small NetCDF checkpoint to Drive."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = destination.with_name(f".{destination.stem}.tmp{destination.suffix}")
+    array.to_netcdf(temporary_path)
+    temporary_path.replace(destination)
+    return destination
+
+
 def initialize_historical_inventory(
     records: Sequence[NDJFMonth],
     *,
@@ -201,18 +212,25 @@ def compute_polygon_mean_divergence_series_chunked(
     window_ds: xr.Dataset,
     *,
     geometry: DetectionGeometry,
-    chunk_hours: int = 48,
+    chunk_hours: int = 24,
     progress_every_hours: int = 24,
     progress_label: str = "Monthly divergence",
+    hourly_checkpoint_path: str | Path | None = None,
 ) -> tuple[xr.DataArray, xr.DataArray]:
-    """Calculate hourly polygon divergence with bounded Colab memory use.
+    """Calculate hourly polygon divergence using fast, bounded batches.
 
-    A short wind-data chunk is loaded from ARCO, but each hourly divergence
-    field is immediately reduced to one polygon-mean scalar and discarded.
-    Therefore the function never retains a month-long 3-D divergence stack in
-    memory.  The scalar hourly values are concatenated before the 12-hour
-    rolling mean is calculated, so D12 remains identical to the original
-    detector calculation.
+    A short wind-data chunk is loaded from ARCO.  MetPy calculates all of the
+    chunk's hourly divergence fields in one vectorized call, and those fields
+    are immediately reduced to polygon-mean scalars.  Thus a full month-long
+    divergence stack is never retained in memory.  The individual hourly
+    calculations are the same three-point MetPy finite differences used by
+    the established detector; batching changes only execution speed.
+
+    When ``hourly_checkpoint_path`` is supplied, the scalar hourly series is
+    atomically saved after every progress interval.  A rerun validates and
+    resumes that partial series, so an interrupted month does not start from
+    hour zero.  The final trailing 12-hour mean remains computed only from
+    the complete hourly series.
     """
     if chunk_hours < 1:
         raise ValueError("chunk_hours must be at least one hour")
@@ -224,24 +242,72 @@ def compute_polygon_mean_divergence_series_chunked(
     n_hours = int(window_ds.sizes["time"])
     timestamps = np.asarray(window_ds.time.values)
     hourly_values: list[float] = []
-    for start in range(0, n_hours, chunk_hours):
+    resume_index = 0
+    checkpoint = Path(hourly_checkpoint_path) if hourly_checkpoint_path is not None else None
+
+    if checkpoint is not None and checkpoint.exists():
+        cached = None
+        try:
+            cached = xr.open_dataarray(checkpoint).load()
+            cached_values = np.asarray(cached.values, dtype=float)
+            cached_times = np.asarray(cached.time.values)
+            if (
+                "time" in cached.dims
+                and 0 < len(cached_values) <= n_hours
+                and np.isfinite(cached_values).all()
+                and np.array_equal(cached_times, timestamps[: len(cached_values)])
+            ):
+                hourly_values = cached_values.tolist()
+                resume_index = len(hourly_values)
+                print(f"{progress_label}: resuming {resume_index}/{n_hours} saved hourly fields")
+            else:
+                print(f"{progress_label}: ignoring incompatible hourly partial checkpoint")
+        except Exception as error:  # pragma: no cover - defensive Drive recovery
+            print(f"{progress_label}: ignoring unreadable hourly partial checkpoint ({type(error).__name__})")
+        finally:
+            if cached is not None:
+                cached.close()
+
+    weight_values = np.asarray(geometry.weights.values, dtype=float)
+    weight_total = float(weight_values.sum())
+    if not np.isfinite(weight_total) or weight_total <= 0:
+        raise ValueError("Polygon weights must have a positive finite sum")
+
+    dx_values = np.asarray(geometry.dx.magnitude)
+    dy_values = np.asarray(geometry.dy.magnitude)
+    for start in range(resume_index, n_hours, chunk_hours):
         stop = min(start + chunk_hours, n_hours)
         chunk = window_ds.isel(time=slice(start, stop)).load()
-        for index in range(int(chunk.sizes["time"])):
-            divergence = compute_divergence_field(
-                chunk.isel(time=index),
-                dx=geometry.dx,
-                dy=geometry.dy,
-            )
-            polygon_mean = (
-                (divergence * geometry.weights).sum(dim=("latitude", "longitude"))
-                / geometry.weights.sum(dim=("latitude", "longitude"))
-            )
-            hourly_values.append(float(polygon_mean.values))
-            del divergence, polygon_mean
+        n_chunk_hours = int(chunk.sizes["time"])
+        # MetPy accepts an extra leading time dimension when dx/dy are expanded
+        # to match it.  This is mathematically identical to calling divergence
+        # once per hour, but removes hundreds of Python/MetPy dispatches.
+        dx_chunk = np.broadcast_to(dx_values, (n_chunk_hours, *dx_values.shape)) * geometry.dx.units
+        dy_chunk = np.broadcast_to(dy_values, (n_chunk_hours, *dy_values.shape)) * geometry.dy.units
+        divergence = mpcalc.divergence(
+            chunk["u_component_of_wind"].values * units("m/s"),
+            chunk["v_component_of_wind"].values * units("m/s"),
+            dx=dx_chunk,
+            dy=dy_chunk,
+            x_dim=-1,
+            y_dim=-2,
+        ).magnitude
+        polygon_means = (divergence * weight_values[None, :, :]).sum(axis=(-2, -1)) / weight_total
+        hourly_values.extend(np.asarray(polygon_means, dtype=float).tolist())
         if stop % progress_every_hours == 0 or stop == n_hours:
             print(f"{progress_label}: {stop}/{n_hours} hourly fields complete")
-        del chunk
+        if checkpoint is not None and (stop % progress_every_hours == 0 or stop == n_hours):
+            partial_hourly = xr.DataArray(
+                np.asarray(hourly_values),
+                coords={"time": timestamps[:stop]},
+                dims="time",
+                name="polygon_mean_divergence_925hpa",
+                attrs={"units": "s^-1", "checkpoint": "resumable partial hourly series"},
+            )
+            write_dataarray_atomic(partial_hourly, checkpoint)
+            print(f"{progress_label}: hourly partial checkpoint saved ({stop}/{n_hours})")
+            del partial_hourly
+        del chunk, divergence, polygon_means, dx_chunk, dy_chunk
         gc.collect()
 
     hourly = xr.DataArray(
