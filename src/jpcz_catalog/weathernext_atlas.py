@@ -21,7 +21,13 @@ LEAD_HOURS = (24, 120, 240)
 DATE_COLUMNS = ("event_start", "event_end", "event_peak")
 ARCHIVE_ROOT = "weathernext/weathernext_2_0_0/zarr"
 SCHEMA_VERSION = 2
-PLOT_STYLE_VERSION = 1
+PLOT_STYLE_VERSION = 2
+WN2_PRESSURE_LEVELS = (50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000)
+EARTH_RADIUS_M = 6371000.0
+EARTH_OMEGA_S1 = 7.292115e-5
+STANDARD_GRAVITY = 9.80665
+KAPPA = 2.0 / 7.0
+DERIVED_FIELDS = {"divergence", "ertel_pv"}
 # The historical merged stores omit variable-level units. Use the published WN2
 # schema only for known variables with ABSENT units; never override declared units.
 WN2_SCHEMA_UNITS = {
@@ -62,6 +68,8 @@ class FieldSpec:
 FIELD_PRESETS = {
     "height": FieldSpec("height", "geopotential height", ("geopotential",), "m", "viridis", (4800, 6000), 500, "height"),
     "winds": FieldSpec("winds", "winds", ("u_component_of_wind", "v_component_of_wind"), "m s⁻¹", "YlGnBu", (0, 30), 925, "wind"),
+    "divergence": FieldSpec("divergence", "horizontal divergence (derived)", ("u_component_of_wind", "v_component_of_wind"), "10⁻⁵ s⁻¹", "RdBu_r", (-10, 10), 925, "divergence"),
+    "ertel_pv": FieldSpec("ertel_pv", "Ertel PV (derived)", ("temperature", "u_component_of_wind", "v_component_of_wind"), "PVU", "RdBu_r", (-2, 2), 1000, "ertel_pv"),
     "temperature": FieldSpec("temperature", "temperature", ("temperature",), "°C", "coolwarm", (-40, 20), 850, "temperature"),
     "humidity": FieldSpec("humidity", "specific humidity", ("specific_humidity",), "g kg⁻¹", "YlGnBu", (0, 10), 925, "humidity"),
     "vertical_velocity": FieldSpec("vertical_velocity", "vertical velocity", ("vertical_velocity",), "Pa s⁻¹", "RdBu_r", (-1, 1), 700),
@@ -308,7 +316,7 @@ def canonical_run(ds, init_time):
     return run
 
 
-def select_forecast(ds, init_time, lead_hours, member, variables, level, domain):
+def select_forecast(ds, init_time, lead_hours, member, variables, level, domain, *, level_stencil=None):
     """Select exact member/lead/level and region before reading forecast fields."""
     required = {"sample", "time", "lat", "lon", "init_time"}
     if not required.issubset(ds.coords):
@@ -335,7 +343,14 @@ def select_forecast(ds, init_time, lead_hours, member, variables, level, domain)
     if level is not None:
         if "level" not in snap.dims or level not in snap.level.values:
             raise ValueError(f"Pressure level {level} hPa is unavailable.")
-        snap = snap.sel(level=level)
+        if level_stencil is not None:
+            if len(level_stencil) != 3 or len(set(level_stencil)) != 3 or level not in level_stencil:
+                raise ValueError("PV needs three distinct pressure levels including the target.")
+            if not set(level_stencil).issubset(set(snap.level.values)):
+                raise ValueError("Requested PV pressure stencil is unavailable.")
+            snap = snap.sel(level=list(level_stencil)).sortby("level")
+        else:
+            snap = snap.sel(level=level)
     elif "level" in snap.dims:
         raise ValueError("Surface preset unexpectedly retains a pressure-level dimension.")
     west, east, south, north = domain
@@ -353,9 +368,98 @@ def select_forecast(ds, init_time, lead_hours, member, variables, level, domain)
         if float(np.min(actual)) > lo + .26 or float(np.max(actual)) < hi - .26:
             raise ValueError(f"Forecast grid does not cover requested {coordinate} bounds.")
     for name in variables:
-        if set(snap[name].dims) != {"lat", "lon"}:
+        expected_dims = {"level", "lat", "lon"} if level_stencil is not None else {"lat", "lon"}
+        if set(snap[name].dims) != expected_dims:
             raise ValueError(f"Unexpected remaining dimensions for {name}: {snap[name].dims}.")
-    return snap.transpose("lat", "lon").sortby("lat").sortby("lon")
+    order = ("level", "lat", "lon") if level_stencil is not None else ("lat", "lon")
+    return snap.transpose(*order).sortby("lat").sortby("lon")
+
+
+def pv_pressure_stencil(available_levels, target):
+    levels = sorted({int(p) for p in available_levels})
+    if target not in levels or len(levels) < 3:
+        raise ValueError("Ertel PV requires the target and at least three available pressure levels.")
+    index = levels.index(target)
+    first = max(0, min(index - 1, len(levels) - 3))
+    stencil = levels[first:first + 3]
+    method = "centered" if stencil[0] < target < stencil[-1] else "one-sided at pressure-range boundary"
+    return stencil, method
+
+
+def diagnostic_settings(ds, spec, domain):
+    if spec.key not in DERIVED_FIELDS:
+        return None
+    settings = {"algorithm_version": 1, "earth_radius_m": EARTH_RADIUS_M,
+                "horizontal_derivative": "second-order differences on spherical latitude/longitude grid",
+                "halo_cells": 2, "below_ground_mask": "not applied; source surface pressure/terrain unavailable",
+                "temporal_operation": "instantaneous forecast snapshot"}
+    if spec.key == "ertel_pv":
+        stencil, method = pv_pressure_stencil(ds.level.values, spec.level)
+        settings.update(pressure_stencil_hpa=stencil, vertical_derivative=method,
+                        pressure_derivative_units="Pa", theta_reference_hpa=1000,
+                        theta_kappa=KAPPA, earth_omega_s1=EARTH_OMEGA_S1,
+                        gravity_ms2=STANDARD_GRAVITY, pv_definition="dry hydrostatic pressure-coordinate Ertel PV",
+                        formula="-g * (du_dp*dtheta_dy - dv_dp*dtheta_dx + (zeta+f)*dtheta_dp)",
+                        display_multiplier=1e6)
+    else:
+        settings.update(formula="[du/dlambda + d(v*cos(phi))/dphi] / [R*cos(phi)]", display_multiplier=1e5)
+    return settings
+
+
+def diagnostic_domain(ds, domain):
+    """Include two source cells outside map bounds when available, then crop after differentiation."""
+    lat, lon = ds.lat.values, ds.lon.values
+    dlat, dlon = abs(float(lat[1] - lat[0])), abs(float(lon[1] - lon[0]))
+    west, east, south, north = domain
+    return (max(west - 2 * dlon, float(np.min(lon))), min(east + 2 * dlon, float(np.max(lon))),
+            max(south - 2 * dlat, float(np.min(lat))), min(north + 2 * dlat, float(np.max(lat))))
+
+
+def derive_field(snap, spec, domain):
+    """Dry hydrostatic PV and signed horizontal divergence with spherical metric terms.
+
+    u/v are eastward/northward winds. Pressure is in Pa; theta references 1000 hPa.
+    PV includes both vertical-shear/horizontal-theta terms, not just (zeta+f)*dtheta/dp.
+    """
+    for name in spec.variables:
+        expected = {"kelvin"} if name == "temperature" else {"wind"}
+        if unit_kind(snap[name].attrs.get("units", "")) not in expected:
+            raise ValueError(f"Unexpected units for derived-field input {name}: {snap[name].attrs.get('units')!r}.")
+    # Only regional inputs are retained; original packed source chunks are decoded serially.
+    snap = snap.load(scheduler="synchronous")
+    phi, lam = np.deg2rad(snap.lat.values), np.deg2rad(snap.lon.values)
+    if len(phi) < 3 or len(lam) < 3 or np.any(np.abs(np.cos(phi)) < 1e-6):
+        raise ValueError("Diagnostics need at least three latitudes/longitudes away from the poles.")
+    if np.any(np.diff(phi) <= 0) or np.any(np.diff(lam) <= 0):
+        raise ValueError("Diagnostic latitude/longitude must increase; select_forecast normalizes ordering.")
+    cosphi = np.cos(phi)[:, None]
+    u, v = snap.u_component_of_wind.values, snap.v_component_of_wind.values
+    if spec.key == "divergence":
+        values = (np.gradient(u, lam, axis=-1, edge_order=2)
+                  + np.gradient(v * cosphi, phi, axis=-2, edge_order=2)) / (EARTH_RADIUS_M * cosphi) * 1e5
+    elif spec.key == "ertel_pv":
+        pressure = snap.level.values.astype(float) * 100.0
+        if len(pressure) != 3 or np.any(np.diff(pressure) <= 0):
+            raise ValueError("PV needs three distinct, increasing pressure levels.")
+        theta = snap.temperature.values * (100000.0 / pressure[:, None, None]) ** KAPPA
+        theta_p = np.gradient(theta, pressure, axis=0, edge_order=2)
+        u_p = np.gradient(u, pressure, axis=0, edge_order=2)
+        v_p = np.gradient(v, pressure, axis=0, edge_order=2)
+        theta_x = np.gradient(theta, lam, axis=-1, edge_order=2) / (EARTH_RADIUS_M * cosphi)
+        theta_y = np.gradient(theta, phi, axis=-2, edge_order=2) / EARTH_RADIUS_M
+        zeta = (np.gradient(v, lam, axis=-1, edge_order=2)
+                - np.gradient(u * cosphi, phi, axis=-2, edge_order=2)) / (EARTH_RADIUS_M * cosphi)
+        coriolis = 2 * EARTH_OMEGA_S1 * np.sin(phi)[:, None]
+        pv = -STANDARD_GRAVITY * (u_p * theta_y - v_p * theta_x + (zeta + coriolis) * theta_p)
+        index = list(snap.level.values).index(spec.level)
+        values = pv[index] * 1e6
+    else:
+        raise ValueError(f"Unknown derived diagnostic {spec.key}.")
+    result = xr.Dataset({"value": (("lat", "lon"), values)}, coords={"lat": snap.lat, "lon": snap.lon})
+    west, east, south, north = domain
+    result = result.sel(lat=slice(south, north), lon=slice(west, east)).reset_coords(drop=True)
+    result.value.attrs = {"units": spec.units, "long_name": spec.title}
+    return result
 
 
 def unit_kind(units):
@@ -407,16 +511,20 @@ def convert_field(snap, spec):
     return result
 
 
-def cache_identity(store, init_time, lead, member, spec, domain):
-    return {"schema": SCHEMA_VERSION, "store": store, "init_time": iso_utc(init_time),
+def cache_identity(store, init_time, lead, member, spec, domain, diagnostic=None):
+    identity = {"schema": SCHEMA_VERSION, "store": store, "init_time": iso_utc(init_time),
             "lead_hours": int(lead), "member": str(member), "field": spec.key,
             "variables": list(spec.variables), "level_hpa": spec.level,
             "conversion": spec.conversion, "domain": list(domain)}
+    if diagnostic is not None:
+        identity["diagnostic"] = diagnostic
+    return identity
 
 
 def load_panel(archive, cache_dir, request, member, spec, domain):
     store, ds = archive.run(request["init_time"])
-    identity = cache_identity(store, request["init_time"], request["lead_hours"], member, spec, domain)
+    diagnostic = diagnostic_settings(ds, spec, domain)
+    identity = cache_identity(store, request["init_time"], request["lead_hours"], member, spec, domain, diagnostic)
     encoded = json.dumps(identity, sort_keys=True)
     digest = hashlib.sha256(encoded.encode()).hexdigest()[:24]
     path = Path(cache_dir) / f"wn2_{digest}.nc"
@@ -427,11 +535,13 @@ def load_panel(archive, cache_dir, request, member, spec, domain):
             result = cached.load()
         hit = True
     else:
+        selection_domain = diagnostic_domain(ds, domain) if diagnostic else domain
+        stencil = diagnostic.get("pressure_stencil_hpa") if diagnostic else None
         snap = select_forecast(ds, request["init_time"], int(request["lead_hours"]), member,
-                               spec.variables, spec.level, domain)
+                               spec.variables, spec.level, selection_domain, level_stencil=stencil)
         # Historical chunks include 4 members and all 13 levels over the globe.
         # Decode chunks serially to limit RAM; only the selected regional slice is retained.
-        result = convert_field(snap, spec).load(scheduler="synchronous")
+        result = derive_field(snap, spec, domain) if diagnostic else convert_field(snap, spec).load(scheduler="synchronous")
         if not np.isfinite(result.value.values).any():
             raise ValueError("Selected forecast field has no finite data in this region.")
         result.attrs["identity"] = encoded
@@ -500,15 +610,22 @@ def prepare_map_assets():
 
 
 def draw_panel(ax, panel, features=True):
+    from matplotlib.colors import TwoSlopeNorm
     import cartopy.crs as ccrs
     import cartopy.feature as cfeature
     spec, ds, metadata = panel["spec"], panel["data"], panel["metadata"]
     crs = ccrs.PlateCarree()
     ax.set_extent(panel["domain"], crs=crs)
     low, high = spec.limits
-    levels = np.linspace(low, high, 13)
+    if spec.key in DERIVED_FIELDS:
+        if not low < 0 < high:
+            raise ValueError("Divergence/PV color scales must include negative values, zero, and positive values.")
+        levels = np.r_[np.linspace(low, 0, 7), np.linspace(0, high, 7)[1:]]
+        norm = TwoSlopeNorm(vmin=low, vcenter=0, vmax=high)
+    else:
+        levels, norm = np.linspace(low, high, 13), None
     shade = ax.contourf(ds.lon.values, ds.lat.values, ds.value.values, levels=levels,
-                        cmap=spec.palette, extend="both", transform=crs)
+                        cmap=spec.palette, norm=norm, extend="both", transform=crs)
     if spec.conversion == "height":
         interval = 60 if spec.level is not None and spec.level <= 500 else 30
         lo, hi = float(ds.value.min()), float(ds.value.max())
@@ -536,10 +653,19 @@ def draw_panel(ax, panel, features=True):
     grid = ax.gridlines(draw_labels=True, linewidth=.35, color=".4", alpha=.5)
     grid.top_labels = grid.right_labels = False
     grid.xlabel_style = grid.ylabel_style = {"size": 8}
-    ax.set_title(f"{spec.title} | member {metadata['member']} | {metadata['lead_hours'] // 24}-day lead\n"
+    title = (f"{spec.title} | member {metadata['member']} | {metadata['lead_hours'] // 24}-day lead\n"
                  f"Init: {utc_naive(metadata['init_time']):%Y-%m-%d %H:%M} UTC\n"
-                 f"Valid: {utc_naive(metadata['valid_time']):%Y-%m-%d %H:%M} UTC", fontsize=9, pad=9)
+                 f"Valid: {utc_naive(metadata['valid_time']):%Y-%m-%d %H:%M} UTC")
+    if spec.key == "ertel_pv":
+        method = metadata["diagnostic"]["vertical_derivative"]
+        stencil = "/".join(map(str, metadata["diagnostic"]["pressure_stencil_hpa"]))
+        title += f"\nPV stencil {stencil} hPa · {'one-sided' if method.startswith('one-sided') else 'centered'}"
+    ax.set_title(title, fontsize=9, pad=9)
     return shade
+
+
+def colorbar_label(spec):
+    return "10⁻⁵ s⁻¹\nblue: convergence; red: divergence" if spec.key == "divergence" else spec.units
 
 
 def render_event(panels, row, features=True):
@@ -553,7 +679,7 @@ def render_event(panels, row, features=True):
         if index % 3 == 2:
             position = axes.flat[index].get_position()
             cax = fig.add_axes([.935, position.y0, .012, position.height])
-            fig.colorbar(artist, cax=cax, label=panel["spec"].units)
+            fig.colorbar(artist, cax=cax, label=colorbar_label(panel["spec"]))
     m = panels[0]["metadata"]
     peak = pd.to_numeric(row.get("event_peak_D_1e5_s-1", np.nan), errors="coerce")
     fig.suptitle(f"WeatherNext 2 | JPCZ event {int(row.event_number)} | ensemble member {m['member']}\n"
@@ -567,7 +693,7 @@ def render_event(panels, row, features=True):
     fig.text(.05, .045, "1 / 5 / 10 days = exact forecast leads to the same target valid time. "
              "Magenta: JPCZ polygon; orange: coastal wedge.\n"
              "Study window is provisional: operational WN2 training cutoff unverified. "
-             "925-hPa winds may be below terrain over mountains; no below-ground mask applied.\n"
+             "Pressure-level fields/diagnostics are unmasked below the surface (especially 1000 hPa).\n"
              "Source: Google DeepMind / Google Research WeatherNext 2 experimental historical data (CC BY 4.0).",
              fontsize=8, linespacing=1.7)
     return fig
@@ -610,11 +736,11 @@ def export_event(panels, row, output_dir, figure=None, features=True):
         fig, ax = plt.subplots(figsize=(8, 6.8), subplot_kw={"projection": ccrs.PlateCarree()})
         fig.subplots_adjust(bottom=.20, top=.80)
         artist = draw_panel(ax, panel, features)
-        fig.colorbar(artist, ax=ax, shrink=.8, pad=.08, label=panel["spec"].units)
+        fig.colorbar(artist, ax=ax, shrink=.8, pad=.08, label=colorbar_label(panel["spec"]))
         fig.suptitle(f"JPCZ event {int(row.event_number)} | WN2 ensemble member {item['member']}\n"
                      f"Onset {utc_naive(row.event_start):%Y-%m-%d %H:%M} UTC; target − onset {item['onset_offset_hours']:+g} h", fontsize=11)
         fig.text(.08, .04, "Google DeepMind / Google Research WN2 historical data, CC BY 4.0.\n"
-                 "Magenta: JPCZ polygon; orange: coastal wedge. Pressure-level winds are unmasked over terrain.\n"
+                 "Magenta: JPCZ polygon; orange: coastal wedge. Pressure-level fields/diagnostics are unmasked below the surface.\n"
                  "Operational model training cutoff unverified; see metadata and attribution.txt.", fontsize=7)
         stem = f"row{item['row_index'] + 1}_{panel['spec'].key}_lead{item['lead_hours']:03d}h"
         for extension in ("png", "pdf"):
@@ -675,13 +801,14 @@ class WeatherNextBrowser:
         self.export = widgets.Button(description="Export six plots", button_style="success", disabled=True, layout=widgets.Layout(width="200px"))
         self.references = widgets.Button(description="Notebook 35 references", layout=widgets.Layout(width="250px"))
         self.details = widgets.HTML()
+        self.field_help = widgets.HTML()
         self.state = widgets.HTML("Choose an event, then check WN2 access to read the actual member labels.")
         self.row_controls = []
         rows = []
         for index, key in enumerate(("height", "winds")):
             spec = FIELD_PRESETS[key]
             variable = widgets.Dropdown(description=f"Row {index+1}:", options=[(s.label, k) for k, s in FIELD_PRESETS.items()], value=key, layout=widgets.Layout(width="320px"))
-            level = widgets.Dropdown(description="Level (hPa):", options=[500, 925], value=spec.level,
+            level = widgets.Dropdown(description="Level (hPa):", options=WN2_PRESSURE_LEVELS, value=spec.level,
                                      style={"description_width": "105px"}, layout=widgets.Layout(width="250px"))
             domain = widgets.Dropdown(description="Map:", options=list(DOMAINS), value=list(DOMAINS)[index], layout=widgets.Layout(width="420px"))
             low = widgets.FloatText(description="Scale min:", value=spec.limits[0], style={"description_width": "85px"}, layout=widgets.Layout(width="215px"))
@@ -710,7 +837,7 @@ class WeatherNextBrowser:
                          "Controls do not download forecast fields until <b>Load six plots</b>. "
                          "Scale bounds stay fixed across leads/events until you change them.</p>"),
             self.search, self.event, widgets.HBox([self.previous, self.next, self.references]), self.details,
-            widgets.HBox([self.inspect, self.member, self.defaults]), *rows,
+            widgets.HBox([self.inspect, self.member, self.defaults]), *rows, self.field_help,
             widgets.HBox([self.load, self.export]), self.state, self.log_output, self.plot_output, self.reference_output,
         ])
         self._filter()
@@ -768,6 +895,7 @@ class WeatherNextBrowser:
         if self._updating:
             return
         self.export.disabled = True
+        self._update_field_help()
         if self.member.value is None:
             self.state.value = "<b>Member and plots locked until Check data &amp; members succeeds.</b>"
             if self.access_error:
@@ -782,12 +910,34 @@ class WeatherNextBrowser:
     def _variable_changed(self, index):
         controls = self.row_controls[index]
         spec = FIELD_PRESETS[controls["variable"].value]
-        levels = list(map(int, self.schema.level.values)) if self.schema is not None and "level" in self.schema.coords else [500, 925]
+        levels = list(map(int, self.schema.level.values)) if self.schema is not None and "level" in self.schema.coords else list(WN2_PRESSURE_LEVELS)
         controls["level"].disabled = spec.level is None
         controls["level"].options = levels if spec.level is not None else [None]
         controls["level"].value = (spec.level if spec.level in levels else levels[0]) if spec.level is not None else None
         controls["low"].value, controls["high"].value = spec.limits
         self._changed()
+
+    def _update_field_help(self):
+        messages = []
+        for index, controls in enumerate(self.row_controls):
+            key, level = controls["variable"].value, controls["level"].value
+            if key == "divergence":
+                messages.append(f"<b>Row {index+1} · derived divergence:</b> instantaneous spherical horizontal divergence "
+                                "from this member's winds. <b>Negative/blue = convergence; positive/red = divergence.</b> "
+                                "Units: 10⁻⁵ s⁻¹. This is not the catalog's 12-hour D12 measure.")
+            elif key == "ertel_pv" and level is not None:
+                levels = self.schema.level.values if self.schema is not None else WN2_PRESSURE_LEVELS
+                try:
+                    stencil, method = pv_pressure_stencil(levels, level)
+                    messages.append(f"<b>Row {index+1} · derived dry Ertel PV at {level} hPa:</b> temperature and both wind "
+                                    f"components at {' / '.join(map(str, stencil))} hPa; {method} vertical derivative. "
+                                    "Includes vertical shear, horizontal potential-temperature gradients, relative vorticity, "
+                                    "and Coriolis. Units: PVU. The 1000-hPa potential-temperature reference is distinct from the selected map level.")
+                except ValueError as error:
+                    messages.append(html.escape(str(error)))
+                messages.append("<b>Low-level interpretation:</b> 1000 hPa can lie below the surface, including over sea "
+                                "when surface pressure is lower. These fields lack a surface-pressure/terrain mask.")
+        self.field_help.value = "<br>".join(messages)
 
     def _defaults(self, _=None):
         for index, key in enumerate(("height", "winds")):
@@ -857,6 +1007,8 @@ class WeatherNextBrowser:
             if not np.isfinite([low, high]).all() or low >= high:
                 raise ValueError("Each color scale needs finite minimum < maximum.")
             spec = replace(FIELD_PRESETS[controls["variable"].value], level=controls["level"].value, limits=(low, high))
+            if spec.key in DERIVED_FIELDS and not low < 0 < high:
+                raise ValueError("Divergence/PV scales must straddle zero so negative and positive values retain their colors.")
             specs.append(spec)
             domains.append(DOMAINS[controls["domain"].value])
         return specs, domains
@@ -865,6 +1017,7 @@ class WeatherNextBrowser:
         import matplotlib.pyplot as plt
         from IPython.display import display
         self.load.disabled = self.inspect.disabled = self.export.disabled = True
+        self.state.value = "<b>Loading six plots for the selected event and member…</b> Derived fields are calculated from WN2 inputs."
         self.log_output.clear_output()
         with self.log_output:
             try:

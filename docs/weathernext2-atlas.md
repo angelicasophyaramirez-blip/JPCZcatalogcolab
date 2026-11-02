@@ -65,7 +65,41 @@ All three leads in each row use identical scales and domains. The scale stays fi
 events until changed. Winds show speed shading and vector arrows with a fixed 10 m/s key.
 Height uses a constant contour interval for a given pressure-level range. Every panel
 labels its member, level, initialization, valid time, and lead; color bars label units.
-925-hPa winds are unmasked below terrain and must be interpreted accordingly.
+Pressure-level fields and derived diagnostics lack a below-surface mask and must be
+interpreted accordingly, especially at 1000 hPa.
+
+## Derived variables in the same dropdowns
+
+**Horizontal divergence (derived)** uses eastward/northward winds at the selected
+pressure level (default 925 hPa). Spherical divergence includes the meridional metric
+term: `[du/dlambda + d(v*cos(phi))/dphi] / [R*cos(phi)]`. Values are displayed in
+10⁻⁵ s⁻¹ with **negative values blue (convergence), positive values red (divergence)**,
+and zero centered in the color scale. This is an instantaneous forecast diagnostic,
+distinct from Notebook 35's 12-hour D12 peak-intensity measure.
+
+**Ertel PV (derived)** is dry hydrostatic pressure-coordinate Ertel PV, defaulting to
+a 1000-hPa map, in PVU (10⁻⁶ K m² kg⁻¹ s⁻¹). It uses temperature and both winds at
+three pressure levels and includes both horizontal-theta-gradient/vertical-shear terms:
+
+`PV = -g * [du/dp * dtheta/dy - dv/dp * dtheta/dx + (zeta + f) * dtheta/dp]`.
+
+Potential temperature references 1000 hPa with kappa = 2/7; derivatives use pressure
+in Pa. Vorticity and horizontal gradients include spherical latitude/longitude metrics,
+with R = 6,371,000 m, g = 9.80665 m/s² and Earth rotation 7.292115×10⁻⁵ s⁻¹.
+Centered, second-order three-point derivatives are used at interior pressure levels;
+1000 hPa uses a one-sided 850/925/1000-hPa stencil, labeled on each PV panel.
+Horizontal derivatives use a two-cell halo wherever the source grid permits, then crop
+to the requested map domain. Stencil, formula, constants, units, and algorithm version
+are included in cache identities and export metadata. The field dropdowns handle the
+extra input retrieval and calculation automatically while preserving the selected member.
+
+1000 hPa is a pressure surface, not the physical surface everywhere. It can lie below
+land and below sea level in low-pressure systems. The archive lacks surface pressure
+and terrain for a complete validity mask; no mask is inferred from mean sea-level pressure.
+
+Both diagnostic color scales must straddle zero. **Assignment defaults** restores
+500-hPa height and 925-hPa winds; adding diagnostics does not change the six-panel
+layout or the fixed single-member rule.
 
 New outputs live under `JPCZcatalog_outputs/weathernext2_atlas`. Existing catalogs and
 Notebook 35 products are read only. Regional subsets are cached on Drive. Historical
@@ -92,6 +126,9 @@ Regression checks: `tests/test_weathernext_atlas.py`. Tests use synthetic datase
 the official WN2 coordinate structure, including a Zarr 3 round trip, and are not evidence
 of authenticated access to Google's private forecast data. The live Colab access check and
 first actual forecast render remain required before interpreting the research output.
+The diagnostic tests additionally require `metpy>=1.7,<2` for an independent comparison
+with MetPy's routines using explicit spherical map metrics; the notebook calculations
+themselves use NumPy and do not add a runtime MetPy dependency.
 
 ## Sources
 
@@ -99,3 +136,5 @@ first actual forecast render remain required before interpreting the research ou
 - [Google's WN2 Zarr starter](https://storage.googleapis.com/weathernext-public/colabs/WeatherNext_2_Starter_Guide_Zarr_on_Google_Cloud_Storage.ipynb)
 - [Dataset and attribution](https://developers.google.com/earth-engine/datasets/catalog/projects_gcp-public-data-weathernext_assets_weathernext_2_0_0)
 - [Research model's training and evaluation](https://arxiv.org/html/2506.10772v1)
+- [MetPy pressure-coordinate PV](https://unidata.github.io/MetPy/latest/api/generated/metpy.calc.potential_vorticity_baroclinic.html)
+- [MetPy divergence](https://unidata.github.io/MetPy/latest/api/generated/metpy.calc.divergence.html)

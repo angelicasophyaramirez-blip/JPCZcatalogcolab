@@ -162,12 +162,34 @@ cells = [
     the scale are indicated by colorbar extensions. Use **Assignment defaults** to restore
     the requested fields. The member stays fixed until you explicitly select another.
 
+    **Derived fields use these same dropdowns.** Select **horizontal divergence (derived)**
+    or **Ertel PV (derived)**, choose its map pressure, and click **Load six plots**. Inputs
+    are read for the same member, initialization, and lead; calculations happen automatically.
+    Divergence defaults to **925 hPa**: **negative/blue = convergence, positive/red = divergence**,
+    in 10⁻⁵ s⁻¹. It is an instantaneous wind diagnostic, not the catalog's 12-hour D12.
+
+    Dry hydrostatic Ertel PV defaults to **1000 hPa**, in **PVU** (1 PVU = 10⁻⁶ K m² kg⁻¹ s⁻¹).
+    It uses temperature and both wind components at three pressure levels, including the
+    horizontal-temperature-gradient/vertical-wind-shear terms and absolute vorticity. At
+    1000 hPa the 850/925/1000-hPa stencil gives a second-order **one-sided** pressure derivative;
+    interior levels use a centered stencil. Potential temperature references 1000 hPa, which
+    is a separate choice from the selected PV map level. Derivatives use Pa, radians, a
+    spherical Earth radius of 6,371,000 m, and a two-cell horizontal halo where available.
+    Both signed diagnostics use zero-centered scales; scale bounds must straddle zero.
+    These are diagnostic calculations from WN2 fields, not additional native forecast variables.
+
+    The implementations are checked against manufactured analytic fields and
+    [MetPy's pressure-coordinate PV](https://unidata.github.io/MetPy/latest/api/generated/metpy.calc.potential_vorticity_baroclinic.html)
+    and [horizontal divergence](https://unidata.github.io/MetPy/latest/api/generated/metpy.calc.divergence.html).
+
     Export is disabled after a selection change until its six plots load successfully.
     Missing runs/members are errors, not substitutions. Regional cache entries include run,
     lead, native member label, variables, level, conversion, and domain.
 
-    **Interpretation:** 925-hPa winds are not masked below mountains; focus on ocean flow
-    and treat mountain samples accordingly. Satellite references from Notebook 35 may be
+    **Interpretation:** pressure-level fields/diagnostics lack a below-surface mask.
+    In particular, 1000 hPa can be below the surface over land and also over sea when
+    surface pressure is less than 1000 hPa. This WN2 archive lacks the surface-pressure/
+    terrain inputs needed to identify all such cells. Satellite references from Notebook 35 may be
     peak-centered and daily daytime context. The core six panels are forecast snapshots;
     timing-error and ensemble-spread validation require later workflows.
     """),

@@ -128,6 +128,8 @@ def test_conversions_and_wind_components():
     init = pd.Timestamp("2023-01-22 18:00")
     ds = synthetic_dataset(init)
     for key in wn.FIELD_PRESETS:
+        if key in wn.DERIVED_FIELDS:
+            continue
         spec = wn.FIELD_PRESETS[key]
         if spec.level not in (None, 500, 925):
             spec = replace(spec, level=925)
@@ -327,6 +329,146 @@ def test_historical_zarr2_roundtrip_and_lead_seconds_validation(tmp_path):
     altered = ds.assign_coords(lead_time_secs=ds.lead_time_secs + 1)
     with pytest.raises(ValueError, match="lead_time_secs"):
         wn.canonical_run(altered, "2023-01-22 18:00")
+
+
+def diagnostic_volume(*, alpha=-.0005, beta=20., gamma=-10., u_shear=.002, v_shear=-.001):
+    levels = np.array([850., 925., 1000.])
+    lat, lon = np.arange(32.5, 47.51, .25), np.arange(124.5, 145.51, .25)
+    p = levels[:, None, None] * 100
+    phi, lam = np.deg2rad(lat)[None, :, None], np.deg2rad(lon)[None, None, :]
+    theta = 300 + alpha * (p - 100000) + beta * (lam - np.deg2rad(135)) + gamma * (phi - np.deg2rad(40))
+    temperature = theta * (p / 100000) ** wn.KAPPA
+    u = np.broadcast_to(u_shear * (p - 100000), theta.shape).copy()
+    v = np.broadcast_to(v_shear * (p - 100000), theta.shape).copy()
+    dims = ("level", "lat", "lon")
+    return xr.Dataset({"temperature": (dims, temperature, {"units": "K"}),
+                       "u_component_of_wind": (dims, u, {"units": "m/s"}),
+                       "v_component_of_wind": (dims, v, {"units": "m s-1"})},
+                      coords={"level": levels, "lat": lat, "lon": lon})
+
+
+def test_pv_1000_uses_one_sided_stencil_and_retains_horizontal_shear_terms():
+    # theta has zero vertical gradient: a vertical-vorticity-only shortcut gives zero,
+    # but the full Ertel PV must retain the two vertical-shear/horizontal-theta terms.
+    ds = diagnostic_volume(alpha=0)
+    spec = wn.FIELD_PRESETS["ertel_pv"]
+    pv = wn.derive_field(ds, spec, (125, 145, 33, 47)).value
+    phi = np.deg2rad(pv.lat.values)[:, None]
+    expected = -wn.STANDARD_GRAVITY * (.002 * -10 / wn.EARTH_RADIUS_M
+                - (-.001) * 20 / (wn.EARTH_RADIUS_M * np.cos(phi))) * 1e6
+    np.testing.assert_allclose(pv.values, np.broadcast_to(expected, pv.shape), atol=2e-12, rtol=1e-8)
+    assert np.max(np.abs(pv.values)) > 1e-5
+    settings = wn.diagnostic_settings(ds, spec, (125, 145, 33, 47))
+    assert settings["pressure_stencil_hpa"] == [850, 925, 1000]
+    assert settings["vertical_derivative"].startswith("one-sided")
+    assert wn.pv_pressure_stencil(wn.WN2_PRESSURE_LEVELS, 925) == ([850, 925, 1000], "centered")
+    assert wn.pv_pressure_stencil(wn.WN2_PRESSURE_LEVELS, 500) == ([400, 500, 600], "centered")
+
+
+def test_pv_coriolis_stability_term_sign_and_pvu_conversion():
+    ds = diagnostic_volume(alpha=-.0005, beta=0, gamma=0, u_shear=0, v_shear=0)
+    pv = wn.derive_field(ds, wn.FIELD_PRESETS["ertel_pv"], (125, 145, 33, 47)).value
+    expected = wn.STANDARD_GRAVITY * .0005 * (2 * wn.EARTH_OMEGA_S1 * np.sin(np.deg2rad(pv.lat.values))) * 1e6
+    np.testing.assert_allclose(pv.values, np.broadcast_to(expected[:, None], pv.shape), atol=2e-11)
+    assert np.all(pv > 0)  # stable NH atmosphere with zero relative vorticity
+
+
+def test_pv_includes_spherical_relative_vorticity_metric_term():
+    ds = diagnostic_volume(alpha=-.0005,beta=0,gamma=0,u_shear=0,v_shear=0)
+    phi=np.deg2rad(ds.lat.values)
+    ds.u_component_of_wind.values[:] = 20*np.cos(phi)[None,:,None]
+    result=wn.derive_field(ds,wn.FIELD_PRESETS['ertel_pv'],(125,145,33,47)).value
+    phi=np.deg2rad(result.lat.values)
+    zeta=40*np.sin(phi)/wn.EARTH_RADIUS_M
+    f=2*wn.EARTH_OMEGA_S1*np.sin(phi)
+    expected=wn.STANDARD_GRAVITY*.0005*(zeta+f)*1e6
+    np.testing.assert_allclose(result.values,np.broadcast_to(expected[:,None],result.shape),rtol=2e-5)
+
+
+def test_divergence_uses_spherical_metric_term_and_preserves_negative_sign():
+    ds = diagnostic_volume().sel(level=925, drop=True)
+    ds.u_component_of_wind[:] = 0
+    ds.v_component_of_wind[:] = 10  # constant northward wind converges on a sphere
+    result = wn.derive_field(ds, wn.FIELD_PRESETS["divergence"], (125, 145, 33, 47)).value
+    expected = -10 * np.tan(np.deg2rad(result.lat.values)) / wn.EARTH_RADIUS_M * 1e5
+    np.testing.assert_allclose(result.values, np.broadcast_to(expected[:, None], result.shape), rtol=1e-5)
+    assert np.all(result < 0)
+
+
+def test_pv_and_divergence_against_metpy_with_spherical_map_metrics():
+    import metpy.calc as mpcalc
+    from metpy.units import units
+    ds = diagnostic_volume()
+    p = ds.level.values[:, None, None] * 100
+    theta = ds.temperature.values * (100000 / p) ** wn.KAPPA
+    # Geographic projection uses nominal R*d(lambda), R*d(phi) spacings and
+    # parallel scale sec(phi), meridional scale 1. Latitude is broadcastable
+    # to the full field for the Coriolis term (a 1-D latitude would broadcast on x).
+    phi, lam = np.deg2rad(ds.lat.values), np.deg2rad(ds.lon.values)
+    kwargs = {"latitude": ds.lat.values[:,None] * units.degrees,
+              "dx": wn.EARTH_RADIUS_M * np.diff(lam) * units.m,
+              "dy": wn.EARTH_RADIUS_M * np.diff(phi) * units.m,
+              "parallel_scale": np.broadcast_to(1/np.cos(phi)[:,None], (len(phi),len(lam))),
+              "meridional_scale": np.ones((len(phi),len(lam)))}
+    reference_pv = mpcalc.potential_vorticity_baroclinic(theta * units.K, p * units.Pa,
+        ds.u_component_of_wind.values * units('m/s'), ds.v_component_of_wind.values * units('m/s'), **kwargs)
+    expected = xr.DataArray(reference_pv.magnitude[-1] * 1e6, dims=("lat", "lon"), coords={"lat": ds.lat, "lon": ds.lon}).sel(lat=slice(33,47), lon=slice(125,145))
+    actual = wn.derive_field(ds, wn.FIELD_PRESETS["ertel_pv"], (125,145,33,47)).value
+    np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-7)
+    middle = replace(wn.FIELD_PRESETS["ertel_pv"],level=925)
+    expected_middle = xr.DataArray(reference_pv.magnitude[1]*1e6,dims=("lat","lon"),coords={"lat":ds.lat,"lon":ds.lon}).sel(lat=slice(33,47),lon=slice(125,145))
+    np.testing.assert_allclose(wn.derive_field(ds,middle,(125,145,33,47)).value,expected_middle,rtol=2e-5,atol=2e-7)
+    # Nonzero uniform northward flow exercises MetPy's map-factor divergence term.
+    snap = ds.sel(level=925, drop=True).copy()
+    reference_div = mpcalc.divergence(snap.u_component_of_wind.values * units('m/s'),
+                                     snap.v_component_of_wind.values * units('m/s'), **kwargs)
+    expected_div = xr.DataArray(reference_div.magnitude * 1e5, dims=("lat", "lon"), coords={"lat": ds.lat, "lon": ds.lon}).sel(lat=slice(33,47), lon=slice(125,145))
+    actual_div = wn.derive_field(snap, wn.FIELD_PRESETS["divergence"], (125,145,33,47)).value
+    # Conservative flux-form differences and MetPy's differentiated map factors
+    # differ at O(dphi**2); require agreement within 0.01%. The analytic test above
+    # independently checks the physical metric term to tighter accuracy.
+    np.testing.assert_allclose(actual_div, expected_div, rtol=1e-4, atol=2e-7)
+
+
+def test_derived_load_selects_member_lead_vertical_stencil_and_crops_halo(row, tmp_path):
+    class DiagnosticArchive:
+        def run(self, init):
+            ds = diagnostic_volume().expand_dims(sample=[0,2], time=pd.to_timedelta([24,120,240],unit="h"))
+            ds = ds.assign_coords(init_time=np.datetime64(init, "ns"), datetime=("time", np.datetime64(init,"ns") + ds.time.values))
+            return "synthetic/historical/predictions.zarr", ds
+    specs = [wn.FIELD_PRESETS["ertel_pv"], wn.FIELD_PRESETS["divergence"]]
+    panels = wn.event_panels(DiagnosticArchive(), tmp_path, row, 2, specs, [(125,145,33,47)]*2, progress=lambda _:None)
+    assert len(panels) == 6 and {p['metadata']['member'] for p in panels} == {'2'}
+    assert panels[0]['metadata']['diagnostic']['pressure_stencil_hpa'] == [850,925,1000]
+    assert all(p['data'].sizes == {"lat":57,"lon":81} for p in panels)
+    assert all(set(p['data'].dims) == {"lat","lon"} for p in panels)
+
+
+def test_divergence_negative_blue_positive_red_even_for_asymmetric_limits(row, tmp_path):
+    import matplotlib.pyplot as plt
+    import cartopy.crs as ccrs
+    spec = replace(wn.FIELD_PRESETS["divergence"], limits=(-4,10))
+    ds = diagnostic_volume().sel(level=925,drop=True)
+    data = wn.derive_field(ds,spec,(125,145,33,47))
+    metadata = {"member":"0","lead_hours":24,"init_time":"2023-01-22T18:00Z", "valid_time":"2023-01-23T18:00Z"}
+    fig, ax = plt.subplots(subplot_kw={"projection":ccrs.PlateCarree()})
+    artist = wn.draw_panel(ax,{"data":data,"spec":spec,"metadata":metadata,"domain":(125,145,33,47)},features=False)
+    blue, red = artist.cmap(artist.norm(-2)), artist.cmap(artist.norm(5))
+    assert blue[2] > blue[0] and red[0] > red[2]
+    assert artist.norm(0) == .5 and 0 in artist.levels
+    plt.close(fig)
+
+
+def test_diagnostic_controls_explain_stencil_and_keep_assignment_defaults(row,tmp_path):
+    browser=wn.WeatherNextBrowser(pd.DataFrame([row]),FakeArchive(),tmp_path/'out',tmp_path/'refs')
+    browser.row_controls[0]['variable'].value='ertel_pv'
+    assert browser.row_controls[0]['level'].value == 1000
+    assert '850 / 925 / 1000' in browser.field_help.value and 'one-sided' in browser.field_help.value
+    browser.row_controls[1]['variable'].value='divergence'
+    assert 'Negative/blue = convergence' in browser.field_help.value
+    assert browser.row_controls[1]['level'].value == 925
+    browser._defaults()
+    assert [c['variable'].value for c in browser.row_controls] == ['height','winds']
 
 
 def test_ui_single_member_controls_and_stale_export(row, tmp_path, monkeypatch):
