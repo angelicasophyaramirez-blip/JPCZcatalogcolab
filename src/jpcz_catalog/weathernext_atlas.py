@@ -20,8 +20,19 @@ import xarray as xr
 LEAD_HOURS = (24, 120, 240)
 DATE_COLUMNS = ("event_start", "event_end", "event_peak")
 ARCHIVE_ROOT = "weathernext/weathernext_2_0_0/zarr"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PLOT_STYLE_VERSION = 1
+# The historical merged stores omit variable-level units. Use the published WN2
+# schema only for known variables with ABSENT units; never override declared units.
+WN2_SCHEMA_UNITS = {
+    "geopotential": "m2 s-2", "u_component_of_wind": "m s-1",
+    "v_component_of_wind": "m s-1", "temperature": "K",
+    "specific_humidity": "kg kg-1", "vertical_velocity": "Pa s-1",
+    "mean_sea_level_pressure": "Pa", "2m_temperature": "K",
+    "sea_surface_temperature": "K", "total_precipitation_6hr": "m",
+    "10m_u_component_of_wind": "m s-1", "10m_v_component_of_wind": "m s-1",
+    "100m_u_component_of_wind": "m s-1", "100m_v_component_of_wind": "m s-1",
+}
 POLYGONS = {
     "JPCZ polygon": [(129.5, 41.0), (136.0, 37.4), (134.5, 35.8), (128.8, 38.0)],
     "Coastal wedge": [(133.05, 35.55), (136.05, 35.55), (139.55, 39.00), (139.55, 42.55)],
@@ -186,6 +197,9 @@ class GoogleCloudArchive:
             self.listings[path] = self.fs.ls(path, detail=False)
         return self.listings[path]
 
+    def _is_store(self, path):
+        return self.fs.exists(path + "/zarr.json") or self.fs.exists(path + "/.zgroup")
+
     def resolve(self, init_time):
         init_time = utc_naive(init_time)
         identity = iso_utc(init_time)
@@ -202,14 +216,21 @@ class GoogleCloudArchive:
             prefix = init_time.strftime("%Y%m%d_%Hhr")
             candidates = []
             for partition in partitions:
+                historical = partition + "/predictions.zarr"
+                if self._is_store(historical):
+                    # Labels such as 2022_to_2023 use an exclusive upper boundary.
+                    # Inspect the actual initialization coordinate, not the label.
+                    if contains_initialization(self.open(historical), init_time):
+                        candidates.append(historical)
+                    continue
                 for path in self._list(partition):
                     name = path.rstrip("/").rsplit("/", 1)[-1]
                     if name.startswith(prefix + "_") or name == prefix:
                         candidates.append(path.rstrip("/") + "/predictions.zarr")
-        stores = sorted({path for path in candidates if
-                         self.fs.exists(path + "/zarr.json") or self.fs.exists(path + "/.zgroup")})
+        stores = sorted({path for path in candidates if self._is_store(path)})
         if not stores:
-            raise FileNotFoundError(f"No WN2 predictions.zarr found for initialization {identity}. No other run was substituted.")
+            raise FileNotFoundError(f"No WN2 store contains exact initialization {identity}. "
+                                    "Checked historical period stores and dated run folders; no other run was substituted.")
         if len(stores) != 1:
             raise ValueError(f"Multiple WN2 stores for {identity}: {stores}. Set RUN_OVERRIDES to an explicit store.")
         if not stores[0].startswith(self.root + "/"):
@@ -233,7 +254,7 @@ class GoogleCloudArchive:
 
     def run(self, init_time):
         store = self.resolve(init_time)
-        return store, self.open(store)
+        return store, canonical_run(self.open(store), init_time)
 
     def clear(self):
         for ds in self.datasets.values():
@@ -242,6 +263,49 @@ class GoogleCloudArchive:
         self.listings.clear()
         self.resolved.clear()
         self.fs.invalidate_cache()
+
+
+def contains_initialization(ds, init_time):
+    init_time = utc_naive(init_time)
+    if "prediction_timedelta" in ds.dims and "time" in ds.coords:
+        if not np.issubdtype(ds.time.dtype, np.datetime64):
+            raise ValueError("Historical WN2 time must decode to initialization datetimes.")
+        return np.datetime64(init_time, "ns") in ds.time.values
+    if "init_time" in ds.coords and ds.init_time.size == 1:
+        return utc_naive(ds.init_time.values.reshape(-1)[0]) == init_time
+    raise ValueError("Unrecognized WN2 initialization-coordinate layout.")
+
+
+def canonical_run(ds, init_time):
+    """Normalize historical and per-run layouts without loading forecast fields."""
+    init_time = utc_naive(init_time)
+    if not contains_initialization(ds, init_time):
+        raise ValueError(f"Store does not contain exact initialization {iso_utc(init_time)}.")
+    if "prediction_timedelta" in ds.dims:
+        run = ds.sel(time=np.datetime64(init_time, "ns"), drop=True)
+        if not np.issubdtype(run.prediction_timedelta.dtype, np.timedelta64):
+            raise ValueError("Historical prediction_timedelta must decode to timedeltas.")
+        run = run.rename({"prediction_timedelta": "time"})
+        if "lead_time_secs" in run.coords:
+            expected = run.time.values / np.timedelta64(1, "s")
+            if not np.array_equal(run.lead_time_secs.values, expected):
+                raise ValueError("Historical lead_time_secs disagrees with prediction_timedelta.")
+        run = run.assign_coords(init_time=np.datetime64(init_time, "ns"),
+                                datetime=("time", np.datetime64(init_time, "ns") + run.time.values))
+        layout = "historical_period_store"
+    else:
+        run, layout = ds, "dated_run_store"
+    run = run.copy(deep=False)
+    run.attrs = {**run.attrs, "source_layout": layout}
+    for name in run.data_vars:
+        attrs = dict(run[name].attrs)
+        if not attrs.get("units") and name in WN2_SCHEMA_UNITS:
+            attrs.update(units=WN2_SCHEMA_UNITS[name],
+                         units_source="official WN2 schema; absent from source variable attributes")
+        else:
+            attrs["units_source"] = "source variable attributes"
+        run[name].attrs = attrs
+    return run
 
 
 def select_forecast(ds, init_time, lead_hours, member, variables, level, domain):
@@ -365,8 +429,9 @@ def load_panel(archive, cache_dir, request, member, spec, domain):
     else:
         snap = select_forecast(ds, request["init_time"], int(request["lead_hours"]), member,
                                spec.variables, spec.level, domain)
-        # Source chunks can be global slices; only this member/lead/level is read.
-        result = convert_field(snap, spec).load()
+        # Historical chunks include 4 members and all 13 levels over the globe.
+        # Decode chunks serially to limit RAM; only the selected regional slice is retained.
+        result = convert_field(snap, spec).load(scheduler="synchronous")
         if not np.isfinite(result.value.values).any():
             raise ValueError("Selected forecast field has no finite data in this region.")
         result.attrs["identity"] = encoded
@@ -381,6 +446,9 @@ def load_panel(archive, cache_dir, request, member, spec, domain):
               "onset_offset_hours": float(request["onset_offset_hours"]), "units": spec.units,
               "field_title": spec.title, "display_min": spec.limits[0], "display_max": spec.limits[1],
               "palette": spec.palette, "cache_hit": hit, "cache_file": str(path), "status": "complete",
+              "source_layout": ds.attrs.get("source_layout", "documented_single_run_schema"),
+              "source_variable_units": json.dumps({name: {"units": ds[name].attrs.get("units"),
+                  "units_source": ds[name].attrs.get("units_source", "source variable attributes")} for name in spec.variables}, sort_keys=True),
               "plot_style_version": PLOT_STYLE_VERSION,
               "wind_vector_spacing_degrees": 1 if domain[1] - domain[0] <= 25 else 2,
               "wind_quiver_scale": 350, "wind_key_ms": 10,
@@ -594,17 +662,18 @@ class WeatherNextBrowser:
         self.cache_dir = self.output_dir / "regional_cache"
         self.loaded = None
         self.schema = None
+        self.access_error = ""
         self._updating = False
         self.search = widgets.Text(description="Find event:", placeholder="Event number, date, or review text", layout=widgets.Layout(width="650px"))
         self.event = widgets.Dropdown(description="Event:", layout=widgets.Layout(width="100%"))
-        self.previous = widgets.Button(description="← Previous event")
-        self.next = widgets.Button(description="Next event →")
-        self.inspect = widgets.Button(description="Check WN2 access / members", button_style="info", layout=widgets.Layout(width="260px"))
+        self.previous = widgets.Button(description="← Previous event", layout=widgets.Layout(width="190px"))
+        self.next = widgets.Button(description="Next event →", layout=widgets.Layout(width="190px"))
+        self.inspect = widgets.Button(description="Check data & members", button_style="info", layout=widgets.Layout(width="250px"))
         self.member = widgets.Dropdown(description="Member:", options=[], disabled=True)
-        self.defaults = widgets.Button(description="Assignment defaults")
+        self.defaults = widgets.Button(description="Assignment defaults", layout=widgets.Layout(width="200px"))
         self.load = widgets.Button(description="Load six plots", button_style="primary", disabled=True)
-        self.export = widgets.Button(description="Export displayed six plots", button_style="success", disabled=True, layout=widgets.Layout(width="240px"))
-        self.references = widgets.Button(description="Find Notebook 35 references", layout=widgets.Layout(width="260px"))
+        self.export = widgets.Button(description="Export six plots", button_style="success", disabled=True, layout=widgets.Layout(width="200px"))
+        self.references = widgets.Button(description="Notebook 35 references", layout=widgets.Layout(width="250px"))
         self.details = widgets.HTML()
         self.state = widgets.HTML("Choose an event, then check WN2 access to read the actual member labels.")
         self.row_controls = []
@@ -612,10 +681,11 @@ class WeatherNextBrowser:
         for index, key in enumerate(("height", "winds")):
             spec = FIELD_PRESETS[key]
             variable = widgets.Dropdown(description=f"Row {index+1}:", options=[(s.label, k) for k, s in FIELD_PRESETS.items()], value=key, layout=widgets.Layout(width="320px"))
-            level = widgets.Dropdown(description="Level (hPa):", options=[500, 925], value=spec.level, layout=widgets.Layout(width="220px"))
+            level = widgets.Dropdown(description="Level (hPa):", options=[500, 925], value=spec.level,
+                                     style={"description_width": "105px"}, layout=widgets.Layout(width="250px"))
             domain = widgets.Dropdown(description="Map:", options=list(DOMAINS), value=list(DOMAINS)[index], layout=widgets.Layout(width="420px"))
-            low = widgets.FloatText(description="Scale min:", value=spec.limits[0], layout=widgets.Layout(width="200px"))
-            high = widgets.FloatText(description="Scale max:", value=spec.limits[1], layout=widgets.Layout(width="200px"))
+            low = widgets.FloatText(description="Scale min:", value=spec.limits[0], style={"description_width": "85px"}, layout=widgets.Layout(width="215px"))
+            high = widgets.FloatText(description="Scale max:", value=spec.limits[1], style={"description_width": "85px"}, layout=widgets.Layout(width="215px"))
             controls = {"variable": variable, "level": level, "domain": domain, "low": low, "high": high}
             self.row_controls.append(controls)
             variable.observe(lambda change, i=index: self._variable_changed(i), names="value")
@@ -698,6 +768,11 @@ class WeatherNextBrowser:
         if self._updating:
             return
         self.export.disabled = True
+        if self.member.value is None:
+            self.state.value = "<b>Member and plots locked until Check data &amp; members succeeds.</b>"
+            if self.access_error:
+                self.state.value += " Last check: " + html.escape(self.access_error)
+            return
         self.state.value = ("<b>Selection changed.</b> Click Load six plots. Any figure below still shows its labeled, previously loaded selection."
                             if self.loaded else "Selections ready. Check WN2 access, then load six plots.")
 
@@ -726,6 +801,7 @@ class WeatherNextBrowser:
         from IPython.display import display
         self.log_output.clear_output()
         self.inspect.disabled = self.load.disabled = self.export.disabled = True
+        self.state.value = "<b>Checking WN2 forecast metadata…</b> Member and plots unlock after all three runs pass."
         with self.log_output:
             try:
                 row = self.selected_row()
@@ -747,6 +823,7 @@ class WeatherNextBrowser:
                 if any(labels != ds.sample.values.tolist() for ds in schemas[1:]):
                     raise ValueError("Member coordinate labels differ across the three runs; inspect before proceeding.")
                 self.schema = schemas[0]
+                self.access_error = ""
                 old = self.member.value
                 self.member.options = [(f"WN2 sample {label}", label) for label in labels]
                 self.member.value = old if old in labels else (0 if 0 in labels else labels[0])
@@ -766,7 +843,8 @@ class WeatherNextBrowser:
                 self.state.value = "<b>WN2 access and all three assignment runs checked.</b> Select one member, then Load six plots."
                 self.load.disabled = False
             except Exception as error:
-                self.state.value = "<b>Access check did not pass.</b> See the message below. No substitute run/member was used."
+                self.access_error = f"{type(error).__name__}: {error}"
+                self.state.value = "<b>Member and plots remain locked: the data check failed.</b> " + html.escape(self.access_error)
                 print(f"{type(error).__name__}: {error}")
                 print("For 401/403: rerun Google authentication with the approved account. For missing runs, check archive coverage or RUN_OVERRIDES.")
             finally:

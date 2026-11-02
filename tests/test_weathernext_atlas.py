@@ -233,7 +233,8 @@ class FakeFS:
         if self.duplicate: paths.append(path + "/20230122_18hr_02_preds")
         return paths
     def exists(self, path):
-        return path.endswith("/predictions.zarr/zarr.json")
+        import re
+        return bool(re.search(r"/\d{8}_\d{2}hr_\d+_preds/predictions.zarr/zarr.json$", path))
 
 
 def fake_google_archive(duplicate=False):
@@ -250,6 +251,82 @@ def test_discovery_uses_exact_date_hour_and_refuses_ambiguous_runs():
     with pytest.raises(FileNotFoundError): archive.resolve("2023-01-23 18:00")
     with pytest.raises(ValueError, match="Multiple"):
         fake_google_archive(True).resolve("2023-01-22 18:00")
+
+
+def historical_dataset(inits):
+    runs = []
+    for init in inits:
+        ds = synthetic_dataset(pd.Timestamp(init)).drop_vars(["init_time", "datetime"])
+        ds = ds.rename({"time": "prediction_timedelta"}).expand_dims(time=[np.datetime64(init, "ns")])
+        ds = ds.assign_coords(lead_time_secs=("prediction_timedelta", ds.prediction_timedelta.values / np.timedelta64(1, "s")))
+        for name in ds.data_vars:
+            ds[name].attrs = {}  # actual historical WN2 field attributes are empty
+        runs.append(ds)
+    return xr.concat(runs, dim="time")
+
+
+def test_actual_historical_layout_selects_initialization_before_renaming_lead():
+    inits = ["2023-01-22 12:00", "2023-01-22 18:00"]
+    ds = historical_dataset(inits)
+    run = wn.canonical_run(ds, inits[1])
+    assert "prediction_timedelta" not in run.dims
+    assert run.time.dtype.kind == "m"
+    assert wn.utc_naive(run.init_time.values) == pd.Timestamp(inits[1])
+    assert run.attrs["source_layout"] == "historical_period_store"
+    assert run.geopotential.attrs["units"] == "m2 s-2"
+    assert "official WN2 schema" in run.geopotential.attrs["units_source"]
+    assert ds.geopotential.attrs == {}  # normalization does not mutate the raw store
+    spec = wn.FIELD_PRESETS["height"]
+    panel = wn.select_forecast(run, inits[1], 24, 2, spec.variables, 500, (125, 145, 33, 47))
+    converted = wn.convert_field(panel, spec)
+    assert float(converted.value.sel(lat=33, lon=125)) == pytest.approx(5300 + 22 + 99 + 125)
+    with pytest.raises(ValueError, match="exact initialization"):
+        wn.canonical_run(ds, "2023-01-22 06:00")
+
+
+def test_historical_units_defaults_do_not_overwrite_declared_unknown_units():
+    ds = historical_dataset(["2023-01-22 18:00"])
+    ds.geopotential.attrs["units"] = "unrecognized"
+    run = wn.canonical_run(ds, "2023-01-22 18:00")
+    assert run.geopotential.attrs["units"] == "unrecognized"
+    spec = wn.FIELD_PRESETS["height"]
+    panel = wn.select_forecast(run, "2023-01-22 18:00", 24, 0, spec.variables, 500, (125, 145, 33, 47))
+    with pytest.raises(ValueError, match="units"):
+        wn.convert_field(panel, spec)
+
+
+def test_historical_discovery_checks_true_period_coverage_not_folder_upper_year():
+    root = wn.ARCHIVE_ROOT
+    paths = {root + "/2022_to_2023/predictions.zarr": historical_dataset(["2022-12-31 18:00"]),
+             root + "/2023_to_2024/predictions.zarr": historical_dataset(["2023-01-22 18:00"])}
+    archive = fake_google_archive()
+    class HistoricalFS:
+        def ls(self, path, detail=False):
+            assert path == root  # no recursive traversal of historical field chunks
+            return [root + "/2022_to_2023", root + "/2023_to_2024"]
+        def exists(self, path):
+            return path.removesuffix("/.zgroup") in paths and path.endswith("/.zgroup")
+    archive.fs = HistoricalFS()
+    archive.open = lambda store: paths[store]
+    store, run = archive.run("2023-01-22 18:00")
+    assert store == root + "/2023_to_2024/predictions.zarr"
+    assert wn.utc_naive(run.init_time.values) == pd.Timestamp("2023-01-22 18:00")
+    with pytest.raises(FileNotFoundError, match="exact initialization"):
+        archive.resolve("2023-01-22 12:00")
+
+
+def test_historical_zarr2_roundtrip_and_lead_seconds_validation(tmp_path):
+    ds = historical_dataset(["2023-01-22 18:00"])
+    path = tmp_path / "historical.zarr"
+    ds.to_zarr(path, zarr_format=2, consolidated=True)
+    with xr.open_zarr(path, chunks={}, consolidated=True) as source:
+        run = wn.canonical_run(source, "2023-01-22 18:00")
+        spec = wn.FIELD_PRESETS["winds"]
+        snap = wn.select_forecast(run, "2023-01-22 18:00", 120, 0, spec.variables, 925, (125, 145, 33, 47))
+        assert wn.convert_field(snap, spec).load(scheduler="synchronous").value.shape == (15, 21)
+    altered = ds.assign_coords(lead_time_secs=ds.lead_time_secs + 1)
+    with pytest.raises(ValueError, match="lead_time_secs"):
+        wn.canonical_run(altered, "2023-01-22 18:00")
 
 
 def test_ui_single_member_controls_and_stale_export(row, tmp_path, monkeypatch):

@@ -3,6 +3,10 @@
 Open `notebooks/36_weathernext2_jpcz_forecast_atlas.ipynb` in Google Colab using
 **File → Upload notebook**, or open it from GitHub after the change is published.
 The notebook embeds its helper code and needs no repository clone or unpublished module download.
+It supports historical period stores (`2023_to_2024/predictions.zarr`, containing 2023
+initializations) and dated run folders used by the later archive. Historical `time` is an
+initialization dimension; `prediction_timedelta` is the forecast lead. Selection is exact
+before normalization to the plotting schema. Actual time coordinates determine coverage.
 
 ## First event
 
@@ -13,10 +17,10 @@ The notebook embeds its helper code and needs no repository clone or unpublished
    or other Cloud settings are created or changed.
 3. Run Sections 4–5. Review the actual selected catalog count, dates, and target-time offsets.
 4. Run both code cells in Section 6 to open the browser. Choose an event, then click
-   **Check WN2 access / members**. Review the three exact forecast-store paths and schema.
+   **Check data & members**. Review the three exact forecast-store paths and schema.
 5. Keep one member selected. Initially use **500-hPa geopotential height** and
    **925-hPa winds**. Click **Load six plots**.
-6. Inspect all six panels and their labels, then click **Export displayed six plots**.
+6. Inspect all six panels and their labels, then click **Export six plots**.
    Use Previous/Next to view another event. Section 7's batch export stays off by default.
 
 ## Forecast convention
@@ -64,8 +68,12 @@ labels its member, level, initialization, valid time, and lead; color bars label
 925-hPa winds are unmasked below terrain and must be interpreted accordingly.
 
 New outputs live under `JPCZcatalog_outputs/weathernext2_atlas`. Existing catalogs and
-Notebook 35 products are read only. Regional subsets are cached on Drive; original chunks
-may span the globe, but other members, leads, and levels are not loaded. Exports include
+Notebook 35 products are read only. Regional subsets are cached on Drive. Historical
+source chunks span four members, all 13 levels, and the globe; reading one slice therefore
+decodes unselected source values too. Chunks are computed sequentially to limit memory,
+and only selected regional fields are retained. Known historical fields omit unit
+attributes; defaults from Google's published WN2 schema and their provenance are recorded
+in the export metadata. Declared units are never silently overridden. Exports include
 their settings in their identities. Completed matching exports are reused after restart.
 
 Changing a control disables export until a successful load; an older displayed figure

@@ -58,7 +58,9 @@ cells = [
     Run once in a fresh Colab runtime. This installs the Zarr 3-capable stack needed for
     Google's forecast stores. The WN2 source array can advertise terabytes without loading
     them: reads remain lazy until one member, lead, level, and region are selected.
-    Source chunks may cover the full globe; only regional results are cached on Drive.
+    Historical source chunks include multiple members, all pressure levels, and the full
+    globe. They are decoded sequentially to limit memory; only selected regional results
+    are retained and cached on Drive.
     """),
     cell("code", """
     import subprocess, sys
@@ -116,8 +118,10 @@ cells = [
     ## 4 · Load forecast and plotting helpers
 
     Run this cell unchanged. Reusable source: `src/jpcz_catalog/weathernext_atlas.py`.
-    It checks exact member labels, forecast leads, initialization and valid times, pressure
-    levels, and units before plotting. Failed requests are reported rather than replaced.
+    It supports historical period stores and dated forecast-run folders, checking exact
+    member labels, leads, initialization/valid times, levels, and units. Historical fields
+    omit units; those known variables use Google's documented WN2 units, recorded in export
+    metadata. Declared but unrecognized units remain an error. No forecast is substituted.
     """),
     cell("code", '# @title Load forecast and plotting helpers (run unchanged)\n' + core),
     cell("markdown", """
@@ -147,10 +151,10 @@ cells = [
     ## 6 · Open the event browser
 
     1. Choose an event or search its number/date/notes.
-    2. Click **Check WN2 access / members**. This inspects metadata for all three runs,
+    2. Click **Check data & members**. This inspects metadata for all three runs,
        checks the assignment fields and units, and reads WN2's actual member labels.
     3. Choose **one member**. Assignment defaults are height at 500 hPa and winds at 925 hPa.
-    4. Click **Load six plots**, inspect all labels/maps, then **Export displayed six plots**.
+    4. Click **Load six plots**, inspect all labels/maps, then **Export six plots**.
     5. Use Previous/Next for another event. No forecast fields load just from changing a control.
 
     Field, level, map domain, and scale bounds can be changed without editing plotting code.
@@ -200,8 +204,10 @@ cells = [
       catalog is substituted. Refresh an incomplete merged catalog in Notebook 06.
     - **Run missing or ambiguous:** the message names the exact initialization. Check
       the archive partition; use `RUN_OVERRIDES` only for an explicit matching run.
-    - **Units/schema mismatch:** inspect the dataset shown by the access check before
-      changing conversion code. The notebook intentionally refuses ambiguous units.
+    - **Units/schema mismatch:** the historical layout uses datetime `time` for model
+      initialization and `prediction_timedelta` for lead. The notebook normalizes this
+      after exact initialization selection. Absent units on known WN2 fields use Google's
+      published schema, with provenance recorded; unrecognized declared units are rejected.
     - **Cartopy download error:** its coastlines/borders require a first-use Natural Earth
       download. Retry when connectivity is restored; no replacement basemap is fabricated.
     - **Runtime disconnected:** run the setup sections again; regional subsets and complete
