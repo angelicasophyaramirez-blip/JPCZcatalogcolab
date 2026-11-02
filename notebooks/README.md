@@ -38,6 +38,8 @@ Planned order:
 32. `32_imerg_association_statistics.ipynb` — final statistics and figures
 33. `33_ndjf_climatological_context_concept.ipynb` — resumable NDJF pressure, wind, SST, temperature, and terrain context figures
 34. `34_historical_ndjf_catalog_1940_2026.ipynb` — separate, resumable full-record historical detector and comparison with the established merged catalog
+35. `35_imerg_manual_case_review.ipynb` — current merged-catalog browser and observational case-review references
+36. `36_weathernext2_jpcz_forecast_atlas.ipynb` — single-member WeatherNext 2 event browser; 500-hPa height and 925-hPa winds at 1-, 5-, and 10-day leads
 
 Design rule:
 
@@ -75,3 +77,4 @@ Design rule:
 - Notebook 32 reads only the backed-up Drive tables, requires a complete event inventory by default, and creates the four precipitation–convergence panels plus the correlation/regression table.
 - Notebook 33 creates seasonal-background (not event-composite) figures: a broad NDJF MSLP/925-hPa wind map with objectively located Siberian High and Aleutian Low centers, and a wider regional terrain/SST/2-m-temperature/925-hPa-wind map. It saves one Drive checkpoint for each NDJF calendar month so interrupted runs resume safely.
 - Notebook 34 preserves the 2000–2025 catalog, reuses its compatible monthly `D12` files read-only, calculates only missing monthly ERA5 divergence checkpoints for complete NDJF seasons 1940/41–2025/26, recomputes the full-record month-specific thresholds, and writes a temporal-overlap comparison of the two final merged catalogs.
+- Notebook 36 is standalone in Colab: it embeds the reusable `weathernext_atlas.py` helpers, authenticates the approved Google account, reads the same current Drive catalog as Notebook 35, discovers exact WN2 forecast stores, and renders six panels for one selected member. It retains the nearest six-hour target on the original UTC start date (ties earlier), checks exact member/lead/level/units, and saves regional caches and exports in `JPCZcatalog_outputs/weathernext2_atlas`. Its 2023-onward study window is provisional until the operational model's training cutoff is verified. See [the Notebook 36 run guide](../docs/weathernext2-atlas.md).
