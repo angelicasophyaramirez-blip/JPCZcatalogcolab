@@ -395,6 +395,17 @@ def test_divergence_uses_spherical_metric_term_and_preserves_negative_sign():
     assert np.all(result < 0)
 
 
+def test_native_float32_inputs_are_differentiated_in_float64():
+    ds=diagnostic_volume().sel(level=925,drop=True).astype('float32')
+    ds=ds.assign_coords(lat=ds.lat.astype('float32'),lon=ds.lon.astype('float32'))
+    ds.u_component_of_wind[:]=0
+    ds.v_component_of_wind[:]=10
+    result=wn.derive_field(ds,wn.FIELD_PRESETS['divergence'],(125,145,33,47)).value
+    expected=-10*np.tan(np.deg2rad(result.lat.values.astype(float)))/wn.EARTH_RADIUS_M*1e5
+    assert result.dtype == np.dtype('float64')
+    np.testing.assert_allclose(result,np.broadcast_to(expected[:,None],result.shape),rtol=1e-5)
+
+
 def test_pv_and_divergence_against_metpy_with_spherical_map_metrics():
     import metpy.calc as mpcalc
     from metpy.units import units

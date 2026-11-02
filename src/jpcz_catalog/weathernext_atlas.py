@@ -389,7 +389,7 @@ def pv_pressure_stencil(available_levels, target):
 def diagnostic_settings(ds, spec, domain):
     if spec.key not in DERIVED_FIELDS:
         return None
-    settings = {"algorithm_version": 1, "earth_radius_m": EARTH_RADIUS_M,
+    settings = {"algorithm_version": 2, "numerical_precision": "float64", "earth_radius_m": EARTH_RADIUS_M,
                 "horizontal_derivative": "second-order differences on spherical latitude/longitude grid",
                 "halo_cells": 2, "below_ground_mask": "not applied; source surface pressure/terrain unavailable",
                 "temporal_operation": "instantaneous forecast snapshot"}
@@ -427,13 +427,15 @@ def derive_field(snap, spec, domain):
             raise ValueError(f"Unexpected units for derived-field input {name}: {snap[name].attrs.get('units')!r}.")
     # Only regional inputs are retained; original packed source chunks are decoded serially.
     snap = snap.load(scheduler="synchronous")
-    phi, lam = np.deg2rad(snap.lat.values), np.deg2rad(snap.lon.values)
+    phi = np.deg2rad(np.asarray(snap.lat.values, dtype=float))
+    lam = np.deg2rad(np.asarray(snap.lon.values, dtype=float))
     if len(phi) < 3 or len(lam) < 3 or np.any(np.abs(np.cos(phi)) < 1e-6):
         raise ValueError("Diagnostics need at least three latitudes/longitudes away from the poles.")
     if np.any(np.diff(phi) <= 0) or np.any(np.diff(lam) <= 0):
         raise ValueError("Diagnostic latitude/longitude must increase; select_forecast normalizes ordering.")
     cosphi = np.cos(phi)[:, None]
-    u, v = snap.u_component_of_wind.values, snap.v_component_of_wind.values
+    u = np.asarray(snap.u_component_of_wind.values, dtype=float)
+    v = np.asarray(snap.v_component_of_wind.values, dtype=float)
     if spec.key == "divergence":
         values = (np.gradient(u, lam, axis=-1, edge_order=2)
                   + np.gradient(v * cosphi, phi, axis=-2, edge_order=2)) / (EARTH_RADIUS_M * cosphi) * 1e5
@@ -441,7 +443,7 @@ def derive_field(snap, spec, domain):
         pressure = snap.level.values.astype(float) * 100.0
         if len(pressure) != 3 or np.any(np.diff(pressure) <= 0):
             raise ValueError("PV needs three distinct, increasing pressure levels.")
-        theta = snap.temperature.values * (100000.0 / pressure[:, None, None]) ** KAPPA
+        theta = np.asarray(snap.temperature.values, dtype=float) * (100000.0 / pressure[:, None, None]) ** KAPPA
         theta_p = np.gradient(theta, pressure, axis=0, edge_order=2)
         u_p = np.gradient(u, pressure, axis=0, edge_order=2)
         v_p = np.gradient(v, pressure, axis=0, edge_order=2)
