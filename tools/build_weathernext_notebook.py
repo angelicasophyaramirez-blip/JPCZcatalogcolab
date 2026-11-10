@@ -96,6 +96,13 @@ cells = [
     directly, while saved reviews/images are optional references. Catalogs and Notebook 35
     outputs are read only. This notebook writes to a separate `weathernext2_atlas` folder.
 
+    **Vortex labels** come from Notebook 35's saved event-screen JSON records, which also
+    drive its event selector. A completed positive scan is **Vortex**; a completed negative
+    scan is **Non-vortex**. Unchecked, failed, or unknown results are labeled explicitly.
+    Legacy manual `case_label` values do not classify these figures. If multiple screen
+    settings folders exist without an active pointer, run **Refresh catalog** in updated
+    Notebook 35 to identify its active settings. Event start/end/peak identities must match.
+
     Enter a Cloud **project ID** if you have one. Leaving it blank uses Google's detected
     project when available. If a project-related permission error appears, set your ID and
     rerun this section and the browser setup. No Cloud project or billing settings are changed.
@@ -161,6 +168,14 @@ cells = [
     Scale bounds stay fixed across leads and events until you change them. Values outside
     the scale are indicated by colorbar extensions. Use **Assignment defaults** to restore
     the requested fields. The member stays fixed until you explicitly select another.
+
+    Figure headings and exports show **Observed event: Vortex / Non-vortex**, matching the
+    Notebook 35 event screen. This is the reference event's class, not an automatic claim
+    about a forecast member. After new scans in Notebook 35, click **Refresh vortex labels**
+    here and then **Load six plots**; matching forecast arrays are reused from cache.
+    Saved Notebook 35 PNGs contain baked-in titles: to replace an old title such as
+    "Unclassified candidate", reopen that event in updated Notebook 35 and click **Load maps**
+    to produce newly labeled reference exports. The reference browser flags stale titles.
 
     **Derived fields use these same dropdowns.** Select **horizontal divergence (derived)**
     or **Ertel PV (derived)**, choose its map pressure, and click **Load six plots**. Inputs

@@ -21,7 +21,8 @@ LEAD_HOURS = (24, 120, 240)
 DATE_COLUMNS = ("event_start", "event_end", "event_peak")
 ARCHIVE_ROOT = "weathernext/weathernext_2_0_0/zarr"
 SCHEMA_VERSION = 2
-PLOT_STYLE_VERSION = 2
+PLOT_STYLE_VERSION = 3
+VORTEX_LABEL_SCHEME = "notebook35_vortex_screen_v2"
 WN2_PRESSURE_LEVELS = (50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000)
 EARTH_RADIUS_M = 6371000.0
 EARTH_OMEGA_S1 = 7.292115e-5
@@ -92,6 +93,87 @@ def iso_utc(value):
     return utc_naive(value).isoformat() + "Z"
 
 
+def vortex_classification(record):
+    """Use completed event-screen results; legacy manual case labels are unrelated."""
+    status = str(record.get("vortex_scan_status", record.get("status", "not_scanned"))).strip().lower()
+    if status == "ambiguous":
+        return "Vortex status ambiguous"
+    if status in {"unavailable", "failed", "error"}:
+        return "Vortex status unavailable"
+    if status != "complete":
+        return "Vortex not checked"
+    value = record.get("vortex_detected")
+    if isinstance(value, (bool, np.bool_)):
+        detected = bool(value)
+    elif isinstance(value, (int, float, np.integer, np.floating)) and pd.notna(value) and value in (0, 1):
+        detected = bool(value)
+    elif isinstance(value, str) and value.strip().lower() in {"true", "false", "0", "1"}:
+        detected = value.strip().lower() in {"true", "1"}
+    else:
+        return "Vortex status unknown"
+    return "Vortex" if detected else "Non-vortex"
+
+
+def vortex_label_metadata(record):
+    label = vortex_classification(record)
+    detected = True if label == "Vortex" else False if label == "Non-vortex" else None
+    return {"vortex_classification": label, "vortex_scan_status": str(record.get("vortex_scan_status", "not_scanned")),
+            "vortex_detected": detected, "vortex_label_scheme": VORTEX_LABEL_SCHEME,
+            "vortex_label_source": str(record.get("vortex_label_source", "saved Notebook 35 event metadata")),
+            "vortex_screen_signature": str(record.get("vortex_screen_signature", ""))}
+
+
+def refresh_vortex_labels(frame, review_dir):
+    """Mirror Notebook 35's per-event JSON cache under its active screen signature.
+
+    The inventory CSV can predate a scan. The JSON event records are what Notebook
+    35 uses in its event dropdown, so they take precedence, without rerunning scans.
+    """
+    frame, root = frame.copy(), Path(review_dir) / "vortex_screen"
+    active = root / "active_screen.json"
+    folder, issue = None, None
+    if active.exists():
+        try:
+            signature = json.loads(active.read_text())["signature"]
+            if not isinstance(signature, str) or not re.fullmatch(r"[0-9a-f]{16}", signature):
+                raise ValueError("Invalid active vortex-screen signature.")
+            folder = root / signature
+        except (ValueError, KeyError, OSError, TypeError):
+            issue = "unavailable"
+    else:
+        folders = [p for p in root.glob("*") if p.is_dir() and re.fullmatch(r"[0-9a-f]{16}", p.name)]
+        if len(folders) == 1:
+            folder = folders[0]
+        elif len(folders) > 1:
+            issue = "ambiguous"
+    records = []
+    for _, row in frame.iterrows():
+        record = row.to_dict()
+        if issue:
+            record.update(vortex_scan_status=issue, vortex_detected=None,
+                          vortex_label_source="Refresh catalog in updated Notebook 35 to identify its active screen.")
+        elif folder is not None:
+            path = folder / ("event_" + hashlib.sha256(str(row.review_key).encode()).hexdigest()[:20] + ".json")
+            record.update(vortex_scan_status="not_scanned", vortex_detected=None,
+                          vortex_label_source=str(path), vortex_screen_signature=folder.name)
+            if path.exists():
+                try:
+                    saved = json.loads(path.read_text())
+                    if (not isinstance(saved, dict) or saved.get("status") != "complete" or saved.get("review_key") != row.review_key
+                            or saved.get("signature") != folder.name):
+                        raise ValueError("Vortex record identity, signature, or completion status does not match.")
+                    record.update(vortex_scan_status="complete", vortex_detected=saved.get("vortex_detected"))
+                except (ValueError, OSError):
+                    record.update(vortex_scan_status="unavailable", vortex_detected=None)
+        else:
+            record["vortex_label_source"] = "saved Notebook 35 inventory; no event cache folder found"
+        records.append(vortex_label_metadata(record))
+    updates = pd.DataFrame(records, index=frame.index)
+    for column in updates:
+        frame[column] = updates[column]
+    return frame
+
+
 def nearest_start_date_time(start):
     """Nearest 00/06/12/18 on the SAME UTC date; equal distances choose earlier."""
     start = utc_naive(start)
@@ -159,6 +241,7 @@ def read_catalog(catalog_path, review_dir, study_start="2023-01-01", study_end=N
         for column in columns:
             mapped = catalog.review_key.map(saved[column])
             catalog[column] = mapped.combine_first(catalog[column]) if column in catalog else mapped
+    catalog = refresh_vortex_labels(catalog, review_dir)
     start = utc_naive(study_start)
     included = catalog.event_start.ge(start)
     reasons = pd.Series("included", index=catalog.index)
@@ -580,6 +663,7 @@ def event_panels(archive, cache_dir, row, member, specs, domains, progress=print
                            event_end=row.event_end, event_peak=row.event_peak)
             progress(f"Row {row_index + 1} | {spec.title} | {request['lead_days']}-day lead | member {member}")
             panel = load_panel(archive, cache_dir, request, member, spec, domain)
+            panel["metadata"].update(vortex_label_metadata(row))
             panel["metadata"]["row_index"] = row_index
             panels.append(panel)
     verify_six_panels(panels)
@@ -684,7 +768,7 @@ def render_event(panels, row, features=True):
             fig.colorbar(artist, cax=cax, label=colorbar_label(panel["spec"]))
     m = panels[0]["metadata"]
     peak = pd.to_numeric(row.get("event_peak_D_1e5_s-1", np.nan), errors="coerce")
-    fig.suptitle(f"WeatherNext 2 | JPCZ event {int(row.event_number)} | ensemble member {m['member']}\n"
+    fig.suptitle(f"WeatherNext 2 | JPCZ event {int(row.event_number)} | Observed event: {vortex_classification(row)} | ensemble member {m['member']}\n"
                  f"Catalog start: {utc_naive(row.event_start):%Y-%m-%d %H:%M} UTC  |  "
                  f"end: {utc_naive(row.event_end):%Y-%m-%d %H:%M} UTC\n"
                  f"Target: {utc_naive(m['valid_time']):%Y-%m-%d %H:%M} UTC  "
@@ -739,7 +823,7 @@ def export_event(panels, row, output_dir, figure=None, features=True):
         fig.subplots_adjust(bottom=.20, top=.80)
         artist = draw_panel(ax, panel, features)
         fig.colorbar(artist, ax=ax, shrink=.8, pad=.08, label=colorbar_label(panel["spec"]))
-        fig.suptitle(f"JPCZ event {int(row.event_number)} | WN2 ensemble member {item['member']}\n"
+        fig.suptitle(f"JPCZ event {int(row.event_number)} | Observed: {vortex_classification(row)} | WN2 ensemble member {item['member']}\n"
                      f"Onset {utc_naive(row.event_start):%Y-%m-%d %H:%M} UTC; target − onset {item['onset_offset_hours']:+g} h", fontsize=11)
         fig.text(.08, .04, "Google DeepMind / Google Research WN2 historical data, CC BY 4.0.\n"
                  "Magenta: JPCZ polygon; orange: coastal wedge. Pressure-level fields/diagnostics are unmasked below the surface.\n"
@@ -772,10 +856,14 @@ def find_notebook35_references(review_dir, row):
                 match &= pd.to_datetime(saved[column], utc=True, errors="coerce").dt.tz_localize(None).eq(utc_naive(row[column]))
             image = path.with_name(path.name.removesuffix("_metadata.csv") + ".png")
             for item in saved.loc[match].to_dict("records"):
-                records.append({**item, "metadata_file": str(path), "image_file": str(image) if image.exists() else ""})
+                current = vortex_classification(row)
+                matches_label = item.get("label_scheme") == VORTEX_LABEL_SCHEME and item.get("label") == current
+                records.append({**item, "current_vortex_classification": current, "reference_label_current": matches_label,
+                                "metadata_file": str(path), "image_file": str(image) if image.exists() else ""})
         except (ValueError, OSError, pd.errors.ParserError):
             continue
-    return pd.DataFrame(records)
+    result = pd.DataFrame(records)
+    return result.sort_values("reference_label_current", ascending=False, kind="stable") if len(result) else result
 
 
 # --- Interactive browser ---
@@ -802,6 +890,7 @@ class WeatherNextBrowser:
         self.load = widgets.Button(description="Load six plots", button_style="primary", disabled=True)
         self.export = widgets.Button(description="Export six plots", button_style="success", disabled=True, layout=widgets.Layout(width="200px"))
         self.references = widgets.Button(description="Notebook 35 references", layout=widgets.Layout(width="250px"))
+        self.refresh_labels = widgets.Button(description="Refresh vortex labels", layout=widgets.Layout(width="220px"))
         self.details = widgets.HTML()
         self.field_help = widgets.HTML()
         self.state = widgets.HTML("Choose an event, then check WN2 access to read the actual member labels.")
@@ -834,11 +923,12 @@ class WeatherNextBrowser:
         self.load.on_click(self._load)
         self.export.on_click(self._export)
         self.references.on_click(self._references)
+        self.refresh_labels.on_click(self._refresh_labels)
         self.view = widgets.VBox([
             widgets.HTML("<h3>WeatherNext 2 · JPCZ event browser</h3><p>One member · two variables · leads 1, 5, 10 days. "
                          "Controls do not download forecast fields until <b>Load six plots</b>. "
                          "Scale bounds stay fixed across leads/events until you change them.</p>"),
-            self.search, self.event, widgets.HBox([self.previous, self.next, self.references]), self.details,
+            self.search, self.event, widgets.HBox([self.previous, self.next, self.references, self.refresh_labels]), self.details,
             widgets.HBox([self.inspect, self.member, self.defaults]), *rows, self.field_help,
             widgets.HBox([self.load, self.export]), self.state, self.log_output, self.plot_output, self.reference_output,
         ])
@@ -856,7 +946,8 @@ class WeatherNextBrowser:
             text = frame.fillna("").astype(str).agg(" ".join, axis=1).str.lower()
             frame = frame.loc[text.str.contains(query, regex=False)]
         old = self.event.value
-        self.event.options = [(f"Event {int(r.event_number)} | {r.event_start:%Y-%m-%d %H:%M} UTC | {r.event_duration_hours:g} h", r.review_key) for r in frame.itertuples()]
+        self.event.options = [(f"Event {int(r.event_number)} | {r.event_start:%Y-%m-%d %H:%M} UTC | {r.event_duration_hours:g} h | "
+                               + vortex_classification(r._asdict()), r.review_key) for r in frame.itertuples()]
         if old in [v for _, v in self.event.options]:
             self.event.value = old
         elif self.event.options:
@@ -879,7 +970,7 @@ class WeatherNextBrowser:
         row = self.selected_row()
         requests = forecast_requests(row)
         peak = pd.to_numeric(row.get("event_peak_D_1e5_s-1", np.nan), errors="coerce")
-        info = (f"<b>Event {int(row.event_number)}</b> · start {row.event_start:%Y-%m-%d %H:%M} UTC · "
+        info = (f"<b>Event {int(row.event_number)} · {vortex_classification(row)}</b> (Notebook 35 event screen) · start {row.event_start:%Y-%m-%d %H:%M} UTC · "
                 f"end {row.event_end:%Y-%m-%d %H:%M} UTC · duration {row.event_duration_hours:g} h<br>"
                 f"Catalog peak {row.event_peak:%Y-%m-%d %H:%M} UTC · signed peak D12 {peak:.2f} × 10⁻⁵ s⁻¹ "
                 "(negative = convergence; not precipitation intensity)<br>"
@@ -889,9 +980,16 @@ class WeatherNextBrowser:
             info += f"{request.lead_days}-day initialization: {request.init_time:%Y-%m-%d %H:%M} UTC &nbsp; "
         for key in ("case_label", "case_notes"):
             if pd.notna(row.get(key)):
-                info += f"<br>{key.replace('_', ' ').title()}: {html.escape(str(row[key]))}"
+                caption = "Legacy manual label (metadata only)" if key == "case_label" else "Case notes"
+                info += f"<br>{caption}: {html.escape(str(row[key]))}"
         self.details.value = info
         self.load.disabled = self.member.value is None
+
+    def _refresh_labels(self, _=None):
+        self.catalog = refresh_vortex_labels(self.catalog, self.review_dir)
+        self._filter()
+        self.export.disabled = True
+        self.state.value = "<b>Notebook 35 vortex labels refreshed.</b> Load six plots to apply the labels; matching forecast data are reused from cache."
 
     def _changed(self, change=None):
         if self._updating:
@@ -1069,7 +1167,10 @@ class WeatherNextBrowser:
                     print("No exported Notebook 35 figures with matching start/end/peak metadata were found. Open and export this event in Notebook 35 to add references.")
                     return
                 print("Notebook 35 reference figures. Check displayed time/windows: these may be peak-centered. MODIS is daily daytime context, not event-hour matched.")
-                columns = [c for c in ("view_hour_utc", "window_start_utc", "window_end_exclusive_utc", "hours", "metadata_file", "image_file") if c in refs]
+                if not refs.reference_label_current.all():
+                    print("Some saved reference images contain legacy/stale titles. Current Notebook 35 status:", vortex_classification(self.selected_row()))
+                    print("To change the text inside those PNG/PDF files, reopen the event in updated Notebook 35 and click Load maps to re-export it. A saved PNG cannot acquire new titles from a catalog refresh alone.")
+                columns = [c for c in ("current_vortex_classification", "reference_label_current", "view_hour_utc", "window_start_utc", "window_end_exclusive_utc", "hours", "metadata_file", "image_file") if c in refs]
                 display(refs[columns])
                 # A comparison figure may contain multiple matched records; show it once.
                 images = list(dict.fromkeys(p for p in refs.image_file if p))

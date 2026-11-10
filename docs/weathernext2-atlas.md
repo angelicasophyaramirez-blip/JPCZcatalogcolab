@@ -50,6 +50,37 @@ There is no nearest-run fallback or ensemble averaging.
 - Notebook 35 reference images are matched using metadata. They can be peak-centered;
   MODIS daily daytime imagery is not matched to the exact forecast hour.
 
+## Vortex labels shared with Notebook 35
+
+The event dropdown, information card, forecast headings, and exported metadata use the
+observed event's saved Notebook 35 vortex-screen result. A completed positive result is
+**Vortex**; a completed negative result is **Non-vortex**. Unscanned events are **Vortex
+not checked**. Failed, ambiguous, and missing verdicts remain explicitly uncertain.
+These labels describe the reference event, not a vortex detection in the WN2 member.
+Legacy `case_label` values such as “ordinary candidate” do not override the screen result.
+
+Notebook 36 reads `imerg_manual_case_review/vortex_screen/active_screen.json` and the
+matching signature folder's `event_<identity hash>.json` records. These are the same
+event records Notebook 35 uses in its selector. A single legacy signature folder can
+also be read without the active pointer. With multiple folders, refresh the catalog in
+updated Notebook 35 to write its active pointer. JSON records must match event identity,
+screen signature, and completion status. No screen is rerun by Notebook 36.
+
+After new Notebook 35 scans, click **Refresh vortex labels**, then **Load six plots** in
+Notebook 36. Data caches remain reusable; new labels are included in export metadata and
+identities so an older completed export cannot hide a classification change.
+
+**Existing reference images need regeneration.** The IMERG/MODIS/ERA5 six-panel reference
+image is generated in Notebook 35 and displayed as a saved PNG in Notebook 36. Changing
+a CSV or a dropdown cannot change the text embedded in that PNG. In updated Notebook 35,
+click **Refresh catalog**, select the same event and displayed time, then **Load maps**.
+New PNG/PDF exports use vortex-screen labels and a new filename version. Notebook 36
+prioritizes reference metadata with current labels and flags legacy/stale titles. Existing
+reference files are preserved.
+
+The standalone Notebook 35 label patch is maintained by
+`tools/update_notebook35_vortex_labels.py`; run it after using Notebook 35's original builder.
+
 ## Maps and output
 
 Each event/member export contains:
