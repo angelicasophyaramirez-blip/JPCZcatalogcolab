@@ -21,8 +21,8 @@ LEAD_HOURS = (24, 120, 240)
 DATE_COLUMNS = ("event_start", "event_end", "event_peak")
 ARCHIVE_ROOT = "weathernext/weathernext_2_0_0/zarr"
 SCHEMA_VERSION = 2
-PLOT_STYLE_VERSION = 3
-VORTEX_LABEL_SCHEME = "notebook35_vortex_screen_v2"
+PLOT_STYLE_VERSION = 4
+VORTEX_LABEL_SCHEME = "notebook35_vortex_screen_v3"
 WN2_PRESSURE_LEVELS = (50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000)
 EARTH_RADIUS_M = 6371000.0
 EARTH_OMEGA_S1 = 7.292115e-5
@@ -114,10 +114,18 @@ def vortex_classification(record):
     return "Vortex" if detected else "Non-vortex"
 
 
+def vortex_plot_label(record):
+    """Use the positive association flag for the two labels shown on figures."""
+    if vortex_classification(record) == "Vortex":
+        return "Vortex-associated"
+    return "Non-vortex-associated"
+
+
 def vortex_label_metadata(record):
     label = vortex_classification(record)
     detected = True if label == "Vortex" else False if label == "Non-vortex" else None
-    return {"vortex_classification": label, "vortex_scan_status": str(record.get("vortex_scan_status", "not_scanned")),
+    return {"vortex_classification": label, "vortex_plot_label": vortex_plot_label(record),
+            "vortex_scan_status": str(record.get("vortex_scan_status", "not_scanned")),
             "vortex_detected": detected, "vortex_label_scheme": VORTEX_LABEL_SCHEME,
             "vortex_label_source": str(record.get("vortex_label_source", "saved Notebook 35 event metadata")),
             "vortex_screen_signature": str(record.get("vortex_screen_signature", ""))}
@@ -739,7 +747,8 @@ def draw_panel(ax, panel, features=True):
     grid = ax.gridlines(draw_labels=True, linewidth=.35, color=".4", alpha=.5)
     grid.top_labels = grid.right_labels = False
     grid.xlabel_style = grid.ylabel_style = {"size": 8}
-    title = (f"{spec.title} | member {metadata['member']} | {metadata['lead_hours'] // 24}-day lead\n"
+    title = (f"Observed event: {vortex_plot_label(metadata)}\n"
+                 f"{spec.title} | member {metadata['member']} | {metadata['lead_hours'] // 24}-day lead\n"
                  f"Init: {utc_naive(metadata['init_time']):%Y-%m-%d %H:%M} UTC\n"
                  f"Valid: {utc_naive(metadata['valid_time']):%Y-%m-%d %H:%M} UTC")
     if spec.key == "ertel_pv":
@@ -768,7 +777,7 @@ def render_event(panels, row, features=True):
             fig.colorbar(artist, cax=cax, label=colorbar_label(panel["spec"]))
     m = panels[0]["metadata"]
     peak = pd.to_numeric(row.get("event_peak_D_1e5_s-1", np.nan), errors="coerce")
-    fig.suptitle(f"WeatherNext 2 | JPCZ event {int(row.event_number)} | Observed event: {vortex_classification(row)} | ensemble member {m['member']}\n"
+    fig.suptitle(f"WeatherNext 2 | JPCZ event {int(row.event_number)} | Observed event: {vortex_plot_label(row)} | ensemble member {m['member']}\n"
                  f"Catalog start: {utc_naive(row.event_start):%Y-%m-%d %H:%M} UTC  |  "
                  f"end: {utc_naive(row.event_end):%Y-%m-%d %H:%M} UTC\n"
                  f"Target: {utc_naive(m['valid_time']):%Y-%m-%d %H:%M} UTC  "
@@ -823,7 +832,7 @@ def export_event(panels, row, output_dir, figure=None, features=True):
         fig.subplots_adjust(bottom=.20, top=.80)
         artist = draw_panel(ax, panel, features)
         fig.colorbar(artist, ax=ax, shrink=.8, pad=.08, label=colorbar_label(panel["spec"]))
-        fig.suptitle(f"JPCZ event {int(row.event_number)} | Observed: {vortex_classification(row)} | WN2 ensemble member {item['member']}\n"
+        fig.suptitle(f"JPCZ event {int(row.event_number)} | WN2 ensemble member {item['member']}\n"
                      f"Onset {utc_naive(row.event_start):%Y-%m-%d %H:%M} UTC; target − onset {item['onset_offset_hours']:+g} h", fontsize=11)
         fig.text(.08, .04, "Google DeepMind / Google Research WN2 historical data, CC BY 4.0.\n"
                  "Magenta: JPCZ polygon; orange: coastal wedge. Pressure-level fields/diagnostics are unmasked below the surface.\n"
@@ -856,7 +865,7 @@ def find_notebook35_references(review_dir, row):
                 match &= pd.to_datetime(saved[column], utc=True, errors="coerce").dt.tz_localize(None).eq(utc_naive(row[column]))
             image = path.with_name(path.name.removesuffix("_metadata.csv") + ".png")
             for item in saved.loc[match].to_dict("records"):
-                current = vortex_classification(row)
+                current = vortex_plot_label(row)
                 matches_label = item.get("label_scheme") == VORTEX_LABEL_SCHEME and item.get("label") == current
                 records.append({**item, "current_vortex_classification": current, "reference_label_current": matches_label,
                                 "metadata_file": str(path), "image_file": str(image) if image.exists() else ""})
@@ -947,7 +956,7 @@ class WeatherNextBrowser:
             frame = frame.loc[text.str.contains(query, regex=False)]
         old = self.event.value
         self.event.options = [(f"Event {int(r.event_number)} | {r.event_start:%Y-%m-%d %H:%M} UTC | {r.event_duration_hours:g} h | "
-                               + vortex_classification(r._asdict()), r.review_key) for r in frame.itertuples()]
+                               + vortex_plot_label(r._asdict()), r.review_key) for r in frame.itertuples()]
         if old in [v for _, v in self.event.options]:
             self.event.value = old
         elif self.event.options:
@@ -970,8 +979,9 @@ class WeatherNextBrowser:
         row = self.selected_row()
         requests = forecast_requests(row)
         peak = pd.to_numeric(row.get("event_peak_D_1e5_s-1", np.nan), errors="coerce")
-        info = (f"<b>Event {int(row.event_number)} · {vortex_classification(row)}</b> (Notebook 35 event screen) · start {row.event_start:%Y-%m-%d %H:%M} UTC · "
+        info = (f"<b>Event {int(row.event_number)} · {vortex_plot_label(row)}</b> · start {row.event_start:%Y-%m-%d %H:%M} UTC · "
                 f"end {row.event_end:%Y-%m-%d %H:%M} UTC · duration {row.event_duration_hours:g} h<br>"
+                f"Notebook 35 vortex screen: {vortex_classification(row)}<br>"
                 f"Catalog peak {row.event_peak:%Y-%m-%d %H:%M} UTC · signed peak D12 {peak:.2f} × 10⁻⁵ s⁻¹ "
                 "(negative = convergence; not precipitation intensity)<br>"
                 f"<b>Forecast target {row.target_valid_time:%Y-%m-%d %H:%M} UTC</b> · target − onset {row.onset_offset_hours:+g} h · "
@@ -1168,7 +1178,7 @@ class WeatherNextBrowser:
                     return
                 print("Notebook 35 reference figures. Check displayed time/windows: these may be peak-centered. MODIS is daily daytime context, not event-hour matched.")
                 if not refs.reference_label_current.all():
-                    print("Some saved reference images contain legacy/stale titles. Current Notebook 35 status:", vortex_classification(self.selected_row()))
+                    print("Some saved reference images have older titles. Current event label:", vortex_plot_label(self.selected_row()))
                     print("To change the text inside those PNG/PDF files, reopen the event in updated Notebook 35 and click Load maps to re-export it. A saved PNG cannot acquire new titles from a catalog refresh alone.")
                 columns = [c for c in ("current_vortex_classification", "reference_label_current", "view_hour_utc", "window_start_utc", "window_end_exclusive_utc", "hours", "metadata_file", "image_file") if c in refs]
                 display(refs[columns])

@@ -53,11 +53,10 @@ There is no nearest-run fallback or ensemble averaging.
 ## Vortex labels shared with Notebook 35
 
 The event dropdown, information card, forecast headings, and exported metadata use the
-observed event's saved Notebook 35 vortex-screen result. A completed positive result is
-**Vortex**; a completed negative result is **Non-vortex**. Unscanned events are **Vortex
-not checked**. Failed, ambiguous, and missing verdicts remain explicitly uncertain.
-These labels describe the reference event, not a vortex detection in the WN2 member.
-Legacy `case_label` values such as “ordinary candidate” do not override the screen result.
+observed event's saved Notebook 35 vortex-screen result. A saved positive result displays
+**Vortex-associated**. Events without that flag display **Non-vortex-associated**. The
+event details and export metadata also record the scan status, including unavailable
+and unchecked results. The titles identify the observed event's association label.
 
 Notebook 36 reads `imerg_manual_case_review/vortex_screen/active_screen.json` and the
 matching signature folder's `event_<identity hash>.json` records. These are the same
@@ -74,6 +73,7 @@ identities so an older completed export cannot hide a classification change.
 image is generated in Notebook 35 and displayed as a saved PNG in Notebook 36. Changing
 a CSV or a dropdown cannot change the text embedded in that PNG. In updated Notebook 35,
 click **Refresh catalog**, select the same event and displayed time, then **Load maps**.
+Use **Show 3 times** to regenerate the −12 h, peak, and +12 h references.
 New PNG/PDF exports use vortex-screen labels and a new filename version. Notebook 36
 prioritizes reference metadata with current labels and flags legacy/stale titles. Existing
 reference files are preserved.
