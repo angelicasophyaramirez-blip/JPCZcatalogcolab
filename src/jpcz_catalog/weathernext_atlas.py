@@ -277,7 +277,7 @@ def forecast_requests(row):
 
 class GoogleCloudArchive:
     """Metadata-first discovery of WN2 runs, without recursive archive downloads."""
-    def __init__(self, credentials, project_id="", root=ARCHIVE_ROOT, overrides=None):
+    def __init__(self, credentials, project_id="", root=ARCHIVE_ROOT, overrides=None, *, lazy_indexing=False):
         import gcsfs
         self.root = root.removeprefix("gs://").rstrip("/")
         if self.root != ARCHIVE_ROOT:
@@ -286,6 +286,7 @@ class GoogleCloudArchive:
         if project_id.strip():
             self.storage_options["project"] = project_id.strip()
         self.fs = gcsfs.GCSFileSystem(**self.storage_options)
+        self.lazy_indexing = lazy_indexing
         self.overrides = {iso_utc(k): str(v).removeprefix("gs://").rstrip("/") for k, v in (overrides or {}).items()}
         self.listings = {}
         self.datasets = {}
@@ -341,7 +342,7 @@ class GoogleCloudArchive:
         if store not in self.datasets:
             # xarray/zarr construct an async-capable fsspec store from this URL.
             ds = xr.open_zarr("gs://" + store, storage_options=self.storage_options,
-                              chunks={}, consolidated=None)
+                              chunks=None if self.lazy_indexing else {}, consolidated=None)
             if "sample" not in ds.coords or "sample" not in ds.dims:
                 ds.close()
                 raise ValueError("Expected the member-resolved WN2 sample coordinate, not ensemble-mean data.")

@@ -123,7 +123,8 @@ cells = [
     else:
         selected = catalog
         result_directory = OUTPUT_DIR / 'catalog'
-    archive = GoogleCloudArchive(credentials, PROJECT_ID or detected_project or '', overrides=RUN_OVERRIDES)
+    archive = GoogleCloudArchive(credentials, PROJECT_ID or detected_project or '',
+                                 overrides=RUN_OVERRIDES, lazy_indexing=True)
     print(f'{len(catalog)} events in the study window. {RUN_MODE} will process {len(selected)}.')
     print('Result folder:', result_directory)
     display(catalog[['event_number', 'event_start', 'event_peak', 'target_valid_time',
@@ -137,6 +138,8 @@ cells = [
     The fixed 925-hPa fields include any below-ground pressure-level values supplied by the
     datasets. The coastal wedge results should be interpreted with that in mind. The notebook
     reads WN2 members in source chunk groups and saves two means per member and lead.
+    Archive arrays use lazy indexing. The notebook selects the exact time, pressure level,
+    and region before reading one wind component at a time, with limited read concurrency.
 
     Each ERA5 rank is one plus the number of member values below ERA5, with seeded random
     tie-breaking. Rank 1 means ERA5 was at the most convergent end and rank 65 at the least

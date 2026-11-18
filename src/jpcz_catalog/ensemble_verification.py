@@ -11,6 +11,7 @@ from tempfile import NamedTemporaryFile
 import numpy as np
 import pandas as pd
 import xarray as xr
+import zarr
 
 from .weathernext_atlas import (
     FIELD_PRESETS, LEAD_HOURS, POLYGONS, diagnostic_domain, diagnostic_settings,
@@ -46,7 +47,9 @@ def polygon_divergence(field):
 
 @lru_cache(maxsize=1)
 def open_verification_era5():
-    return xr.open_zarr(ERA5_STORE, chunks={}, storage_options={"token": "anon"})
+    # Creating Dask graphs for all decades and variables can exceed Colab RAM
+    # before any field is read. Keep backend indexing lazy through subsetting.
+    return xr.open_zarr(ERA5_STORE, chunks=None, storage_options={"token": "anon"})
 
 
 def era5_polygon_values(valid_time, era5):
@@ -55,12 +58,18 @@ def era5_polygon_values(valid_time, era5):
     winds = era5[list(DIVERGENCE_SPEC.variables)].sel(time=target, level=DIVERGENCE_SPEC.level)
     winds = winds.rename({"latitude": "lat", "longitude": "lon"})
     west, east, south, north = diagnostic_domain(winds, VERIFICATION_DOMAIN)
-    winds = winds.sortby("lat").sortby("lon").sel(lat=slice(south, north), lon=slice(west, east))
+    latitude = slice(south, north) if winds.lat[0] < winds.lat[-1] else slice(north, south)
+    longitude = slice(west, east) if winds.lon[0] < winds.lon[-1] else slice(east, west)
+    winds = winds.sel(lat=latitude, lon=longitude)
     if any(abs(actual - expected) > 1e-5 for actual, expected in zip(
             (float(winds.lon.min()), float(winds.lon.max()), float(winds.lat.min()), float(winds.lat.max())),
             (west, east, south, north))):
         raise ValueError("ERA5 grid does not cover the verification domain and its derivative halo.")
-    winds = winds.transpose("lat", "lon")
+    # Decode one wind variable at a time, only after selecting the region.
+    with zarr.config.set({"async.concurrency": 1, "threading.max_workers": 2}):
+        for name in DIVERGENCE_SPEC.variables:
+            winds[name] = winds[name].load(scheduler="synchronous")
+    winds = winds.transpose("lat", "lon").sortby("lat").sortby("lon")
     field = derive_field(winds, DIVERGENCE_SPEC, VERIFICATION_DOMAIN).value
     means, counts = polygon_divergence(field)
     return {"valid_time": iso_utc(target), "source_store": ERA5_STORE, "polygon_cells": counts,
@@ -85,6 +94,9 @@ def forecast_polygon_values(archive, request, progress=print):
         end = start + size
         progress(f"  Reading {request['lead_days']}-day members {start + 1}–{end} of {ENSEMBLE_SIZE}")
         block = snap.isel(sample=slice(start, end))
+        with zarr.config.set({"async.concurrency": 1, "threading.max_workers": 2}):
+            for name in DIVERGENCE_SPEC.variables:
+                block[name] = block[name].load(scheduler="synchronous")
         field = derive_field(block, DIVERGENCE_SPEC, VERIFICATION_DOMAIN).value
         means, counts = polygon_divergence(field)
         for region in POLYGONS:
@@ -176,6 +188,7 @@ def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_
         progress(f"Event {event['event_number']} | verification {event['valid_time_utc']}")
         reference = None
         try:
+            progress("  ERA5: opening the reference archive and reading one 925-hPa wind snapshot")
             reference, cached = checkpoint(
                 cache / f"era5_{stamp}.json", {"valid_time": event["valid_time_utc"]},
                 lambda: era5_polygon_values(target, era5_reader()),
@@ -188,6 +201,7 @@ def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_
             ])
             ref_status = "cached" if cached else "computed"
             ref_error = ""
+            progress(f"  ERA5 {ref_status}: polygon means saved")
         except Exception as error:
             reference = None
             ref_status = "failed"

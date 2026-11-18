@@ -30,7 +30,8 @@ def test_rank_extrema_and_reproducible_ties():
     assert (result["rank_min_if_tied"], result["rank_max_if_tied"]) == (13, 14)
 
 
-def test_notebook37_pilot_resume_and_exports(tmp_path):
+@pytest.mark.parametrize("use_dask", [False, True])
+def test_notebook37_pilot_resume_and_exports(tmp_path, use_dask):
     """Execute the embedded notebook helpers and run the same pilot stages as Colab."""
     notebook = nbformat.read(ROOT / "notebooks/37_weathernext2_ensemble_verification.ipynb", as_version=4)
     nbformat.validate(notebook)
@@ -67,6 +68,9 @@ def test_notebook37_pilot_resume_and_exports(tmp_path):
         u: (("time", "level", "latitude", "longitude"), member_u[0:1, 0] + 11.5 * gradient, units),
         v: (("time", "level", "latitude", "longitude"), np.zeros(winds_shape[1:]), units),
     }, coords={"time": [target], "level": [925], "latitude": lat[::-1], "longitude": lon})
+    if not use_dask:
+        era5.to_zarr(tmp_path / "era5.zarr", mode="w", consolidated=False)
+        era5 = xr.open_zarr(tmp_path / "era5.zarr", chunks=None, consolidated=False)
 
     class TestArchive:
         root = "test/archive"
@@ -86,7 +90,12 @@ def test_notebook37_pilot_resume_and_exports(tmp_path):
                 v: (("sample", "time", "level", "lat", "lon"), np.zeros(winds_shape), units),
             }, coords={"sample": labels, "time": [lead], "level": [925], "lat": lat, "lon": lon,
                        "init_time": init_time, "datetime": ("time", [target])})
-            return f"test/lead-{lead.days}", ds.chunk({"sample": 4})
+            if use_dask:
+                return f"test/lead-{lead.days}", ds.chunk({"sample": 4})
+            store = tmp_path / f"wn2-lead-{lead.days}.zarr"
+            ds.to_zarr(store, mode="w", consolidated=False, encoding={
+                name: {"chunks": (4, 1, 1, len(lat), len(lon))} for name in (u, v)})
+            return f"test/lead-{lead.days}", xr.open_zarr(store, chunks=None, consolidated=False)
 
     archive = TestArchive()
     run = namespace["run_ensemble_verification"]
