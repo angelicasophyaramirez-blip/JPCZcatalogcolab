@@ -36,9 +36,13 @@ cells = [
     JPCZ polygon and coastal wedge, at **1, 5, and 10 days**. Negative values indicate
     convergence. The two polygons are evaluated independently, including their overlap.
 
-    Start in **Pilot** mode. It runs one catalog event and reports six ERA5 ranks. Then switch to
-    **Catalog** and rerun sections 3–5. Synced Drive checkpoints allow each completed ERA5
-    target and forecast lead to be reused after a runtime disconnect.
+    **Catalog** mode processes all selected events. **Pilot** mode processes one event and
+    reports six ERA5 ranks. Each event contributes one rank per polygon and lead. Synced Drive
+    checkpoints allow each completed ERA5 target and forecast lead to be reused after a
+    runtime disconnect.
+
+    Run sections 1–5 in this notebook. Its archive reader and rank calculation are included
+    below. Each helper cell prints a confirmation when it finishes.
 
     The catalog is the same CSV Notebook 35 reads. Notebook 36 supplies the archive reader and
     onset timing rule. You can run this notebook directly using that CSV and your approved
@@ -85,7 +89,7 @@ cells = [
     # @title 3a · Settings
     from pathlib import Path
 
-    RUN_MODE = 'Pilot'  # @param ["Pilot", "Catalog"]
+    RUN_MODE = 'Catalog'  # @param ["Pilot", "Catalog"]
     PILOT_EVENT_NUMBER = 0  # @param {type:"integer"}
     PROJECT_ID = ''  # @param {type:"string"}
     DRIVE_ROOT = Path('/content/drive/MyDrive/JPCZcatalog_outputs')
@@ -96,9 +100,9 @@ cells = [
     STUDY_END_UTC = ''  # @param {type:"string"} # Optional exclusive UTC date.
     RUN_OVERRIDES = {}
     """),
-    cell("code", "# @title 3b · Load Notebook 36 archive helpers (run unchanged)\n" + atlas
+    cell("code", "# @title 3b · Load WeatherNext archive helpers (in this notebook)\n" + atlas
          + "\nprint('Archive helpers loaded. Continue to section 3c.')\n"),
-    cell("code", "# @title 3c · Load verification helpers (run unchanged)\n" + verification
+    cell("code", "# @title 3c · Load rank and Excel helpers (in this notebook)\n" + verification
          + "\nprint('Verification helpers loaded. Continue to section 3d.')\n"),
     cell("code", """
     # @title 3d · Preview the selected catalog
@@ -126,6 +130,8 @@ cells = [
     archive = GoogleCloudArchive(credentials, PROJECT_ID or detected_project or '',
                                  overrides=RUN_OVERRIDES, lazy_indexing=True)
     print(f'{len(catalog)} events in the study window. {RUN_MODE} will process {len(selected)}.')
+    if RUN_MODE == 'Pilot':
+        print('Pilot contributes ONE ERA5 rank to each histogram. Choose Catalog to aggregate all selected events.')
     print('Result folder:', result_directory)
     display(catalog[['event_number', 'event_start', 'event_peak', 'target_valid_time',
                      'onset_offset_hours', 'vortex_plot_label']])
@@ -140,6 +146,11 @@ cells = [
     reads WN2 members in source chunk groups and saves two means per member and lead.
     Archive arrays use lazy indexing. The notebook selects the exact time, pressure level,
     and region before reading one wind component at a time, with limited read concurrency.
+
+    Spatial averages use every finite grid cell inside each polygon with area weights.
+    Negative divergence represents convergence. Positive and negative values retain their
+    signs when averaged and ranked, so the resulting value measures the net convergence
+    or divergence of the whole polygon.
 
     Each ERA5 rank is one plus the number of member values below ERA5, with seeded random
     tie-breaking. Rank 1 means ERA5 was at the most convergent end and rank 65 at the least
@@ -157,9 +168,9 @@ cells = [
     # @title 4 · Read the selected forecasts and calculate ranks
     missing_setup = []
     if not callable(globals().get('read_catalog')):
-        missing_setup.append('3b · Load Notebook 36 archive helpers')
+        missing_setup.append('3b · Load WeatherNext archive helpers')
     if not callable(globals().get('run_ensemble_verification')):
-        missing_setup.append('3c · Load verification helpers')
+        missing_setup.append('3c · Load rank and Excel helpers')
     if any(name not in globals() for name in ('selected', 'archive', 'OUTPUT_DIR')):
         missing_setup.append('3d · Preview the selected catalog')
     if missing_setup:
@@ -172,6 +183,9 @@ cells = [
     display(tables['batch_status'][['event_number', 'lead_days', 'era5_status', 'wn2_status',
                                     'era5_error', 'wn2_error']])
     ranks = tables['case_ranks']
+    complete_events = 0 if ranks.empty else ranks.loc[ranks.in_common_sample, 'review_key'].nunique()
+    print(f'{len(selected)} selected events; {complete_events} complete events contribute to EACH histogram.')
+    print(f'{len(selected) - complete_events} events lack at least one required input. Details appear in Batch status.')
     if not ranks.empty:
         display(ranks[['event_number', 'valid_time_utc', 'polygon', 'lead_days', 'member_count',
                        'era5_divergence_1e5_s-1', 'era5_rank', 'in_common_sample']])
@@ -182,13 +196,29 @@ cells = [
     The Excel workbook opens in Excel or Google Sheets. The same tables are available as
     CSVs. The plots save as PNG and PDF. Pilots and the catalog have separate result folders.
 
-    Each histogram bar groups 13 of the 65 possible ranks. The dashed line shows the
-    expected counts for a uniform rank distribution. Pilot histograms are a check of the
-    workflow. Catalog histograms describe cases selected around ERA5-detected JPCZ events.
+    **Case ranks** lists ERA5's value, exact rank, bin number, and ensemble minimum, mean,
+    and maximum for each event, polygon, and lead. **Member values** retains each forecast
+    value and native member ID. **ERA5 reference** retains the verifying values.
+    **Ordered values** is a flat table with all 65 entries per verifiable case, sorted from
+    most negative divergence to most positive divergence. **Ordered bins** presents the same
+    numbers in five columns of 13 entries, with ERA5 explicitly labeled and highlighted.
+    **Bin counts** gives each polygon/lead's event count in each numbered bin.
+    Values are signed divergence in 10⁻⁵ s⁻¹. Exact rankings use full numerical precision.
+    Ties retain the same reproducibly chosen ERA5 position as the graphs.
+
+    Both plot versions are exported. **65 ranks** shows all possible positions of ERA5
+    within the ensemble. **5 groups** combines 13 consecutive ranks per bar for readability
+    with a small event sample. Both use the same calculated ranks and the same set of
+    complete events. The dashed line shows the expected counts for a uniform rank
+    distribution. The counts in every panel sum to its displayed N.
+
+    A single pilot event populates just one bar per panel. Catalog histograms describe
+    cases selected around ERA5-detected JPCZ events.
     """),
     cell("code", """
     # @title 5 · Save workbook, tables, and six-panel rank histogram
     import matplotlib.pyplot as plt
+    RANK_DISPLAY = '65 ranks'  # @param ["65 ranks", "5 groups"]
 
     tables['event_selection'] = selection_report
     calculation_settings = {
@@ -203,12 +233,16 @@ cells = [
         ),
     }
     export_verification(tables, calculation_settings, result_directory)
-    print('Saved Excel workbook and CSV tables to', result_directory)
+    print('Saved', result_directory / 'ensemble_verification.xlsx')
+    print('CSV tables and both rank-histogram figures are saved in the same folder.')
     if not ranks.empty and ranks.in_common_sample.any():
-        figure = plot_rank_histograms(ranks)
-        for extension in ('png', 'pdf'):
-            figure.savefig(result_directory / f'rank_histograms.{extension}', dpi=180)
-        plt.show()
+        for grouped, filename in ((False, 'rank_histograms_65ranks'), (True, 'rank_histograms')):
+            figure = plot_rank_histograms(ranks, grouped=grouped)
+            for extension in ('png', 'pdf'):
+                figure.savefig(result_directory / f'{filename}.{extension}', dpi=180)
+            if grouped == (RANK_DISPLAY == '5 groups'):
+                display(figure)
+            plt.close(figure)
     else:
         print('No complete event for all three leads. Check Batch status, then retry section 4.')
     """),

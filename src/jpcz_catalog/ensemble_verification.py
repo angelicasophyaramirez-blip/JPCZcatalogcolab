@@ -156,6 +156,7 @@ def observation_rank(members, reference, case_key, *, tie_seed=37):
     rank = lower if lower == upper else int(rng.integers(lower, upper + 1))
     return {
         "era5_rank": rank, "rank_min_if_tied": lower, "rank_max_if_tied": upper,
+        "bin_number": (rank - 1) // 13 + 1,
         "rank_group": RANK_GROUPS[(rank - 1) // 13],
         "below_member_min": bool(reference < values.min()),
         "above_member_max": bool(reference > values.max()),
@@ -258,41 +259,178 @@ def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_
     }, identity
 
 
-def plot_rank_histograms(ranks):
-    """Use five equally sized groups of ranks, with the same cases at each lead."""
-    import matplotlib.pyplot as plt
-
+def rank_histogram_counts(ranks, *, grouped=True):
+    """Count every rank, including empty bins, using common cases at each lead."""
     if ranks.empty or not ranks.in_common_sample.any():
         raise ValueError("No event has complete ERA5 and all three WN2 leads.")
     complete = ranks.loc[ranks.in_common_sample]
     n_events = complete.review_key.nunique()
-    largest_bin = complete.groupby(["polygon", "lead_hours", "rank_group"]).size().max()
-    fig, axes = plt.subplots(2, 3, figsize=(12, 7), sharey=True, layout="constrained")
+    bin_width = 13 if grouped else 1
+    records = []
+    for region in POLYGONS:
+        for lead in LEAD_HOURS:
+            matched = complete.loc[(complete.polygon == region) & (complete.lead_hours == lead)]
+            counts = np.bincount(matched.era5_rank.to_numpy(dtype=int), minlength=ENSEMBLE_SIZE + 2)[1:]
+            counts = counts.reshape(-1, bin_width).sum(axis=1)
+            records.extend({
+                "polygon": region, "lead_days": lead // 24, "matched_events": n_events,
+                "bin_number": index + 1,
+                "rank_from": index * bin_width + 1, "rank_through": (index + 1) * bin_width,
+                "case_count": int(count), "uniform_expected_count": n_events * bin_width / (ENSEMBLE_SIZE + 1),
+            } for index, count in enumerate(counts))
+    return pd.DataFrame(records)
+
+
+def plot_rank_histograms(ranks, *, grouped=True):
+    """Show either all 65 ranks or five groups, with the same cases at each lead."""
+    import matplotlib.pyplot as plt
+
+    bins = rank_histogram_counts(ranks, grouped=grouped)
+    complete = ranks.loc[ranks.in_common_sample]
+    n_events = complete.review_key.nunique()
+    largest_bin = bins.case_count.max()
+    expectation = bins.uniform_expected_count.iloc[0]
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8), sharey=True, layout="constrained")
     for r, region in enumerate(POLYGONS):
         for c, lead in enumerate(LEAD_HOURS):
             ax = axes[r, c]
             matched = complete.loc[(complete.polygon == region) & (complete.lead_hours == lead)]
-            counts = matched.rank_group.value_counts().reindex(RANK_GROUPS, fill_value=0)
-            ax.bar(RANK_GROUPS, counts, color="#277486", width=.8)
-            ax.axhline(n_events / len(RANK_GROUPS), color=".25", linestyle="--", linewidth=1)
-            ax.set_title(f"{region} · {lead // 24}-day lead")
-            ax.set_xlabel("ERA5 rank (most to least convergent)")
+            panel_bins = bins.loc[(bins.polygon == region) & (bins.lead_days == lead // 24)]
+            positions = ([f"Bin {index + 1}\nRanks {label}" for index, label in enumerate(RANK_GROUPS)]
+                         if grouped else np.arange(1, ENSEMBLE_SIZE + 2))
+            ax.bar(positions, panel_bins.case_count, color="#277486", width=.8)
+            ax.axhline(expectation, color=".25", linestyle="--", linewidth=1)
+            ax.set_title(f"{region} · {lead // 24}-day lead · N = {len(matched)}")
+            if not grouped:
+                ax.set_xticks([1, 9, 17, 25, 33, 41, 49, 57, 65])
+            ax.tick_params(axis="x", labelsize=8)
+            ax.set_xlabel("ERA5 rank position among 64 forecast values")
             ax.text(.03, .96, f"Outside ensemble range: {matched.below_member_min.sum()} below, "
                     f"{matched.above_member_max.sum()} above", transform=ax.transAxes, va="top", fontsize=8)
-            ax.set_ylim(0, 1.22 * max(largest_bin, n_events / len(RANK_GROUPS)))
+            ax.set_ylim(0, 1.22 * max(largest_bin, expectation))
             ax.yaxis.get_major_locator().set_params(integer=True)
             if c == 0:
-                ax.set_ylabel("Number of JPCZ cases")
-    fig.suptitle(f"925-hPa divergence at JPCZ onset · {n_events} matched {'case' if n_events == 1 else 'cases'}"
-                 f"{' (pilot)' if n_events == 1 else ''}\n"
-                 "ERA5 ranks among 64 WeatherNext 2 members · 13 ranks per bar · dashed line = uniform ranks")
+                ax.set_ylabel("Number of events")
+    fig.suptitle(f"925-hPa polygon-average divergence at the onset target · {n_events} matched "
+                 f"{'event' if n_events == 1 else 'events'}\n"
+                 f"{'13 ranks' if grouped else '1 rank'} per bar · dashed line = uniform rank reference\n"
+                 "Lower rank = ERA5 more convergent relative to forecasts · Higher rank = ERA5 less convergent")
     return fig
+
+
+def ordered_verification_values(members, ranks):
+    """Pool 64 forecast values and ERA5, preserving the exact saved tie-broken rank."""
+    keys = ["review_key", "polygon", "lead_hours"]
+    columns = [*keys, "event_number", "valid_time_utc", "init_time_utc", "lead_days", "pressure_hpa",
+               "in_common_sample", "position", "bin_number", "rank_range", "source", "member", DIVERGENCE_COLUMN]
+    if ranks.empty:
+        return pd.DataFrame(columns=columns)
+    if ranks.duplicated(keys).any():
+        raise ValueError("Duplicate event/polygon/lead ranks cannot be exported.")
+    groups = {key: group for key, group in members.groupby(keys, sort=False)}
+    records = []
+    for rank in ranks.to_dict("records"):
+        key = tuple(rank[name] for name in keys)
+        group = groups.get(key)
+        if group is None or len(group) != ENSEMBLE_SIZE or group.member.astype(str).nunique() != ENSEMBLE_SIZE:
+            raise ValueError(f"Ordered values require 64 distinct members for {key}.")
+        values = group[DIVERGENCE_COLUMN].to_numpy(dtype=float)
+        observed = rank["era5_divergence_1e5_s-1"]
+        if not np.isfinite(values).all() or not np.isfinite(observed):
+            raise ValueError(f"Ordered values contain missing or nonfinite divergence for {key}.")
+        position = int(rank["era5_rank"])
+        lower = int((values < observed).sum()) + 1
+        upper = lower + int((values == observed).sum())
+        if not lower <= position <= upper:
+            raise ValueError(f"Saved ERA5 rank disagrees with the member values for {key}.")
+        ordered = group.sort_values(DIVERGENCE_COLUMN, kind="stable")
+        entries = [
+            {"source": "WN2", "member": str(item["member"]), DIVERGENCE_COLUMN: float(item[DIVERGENCE_COLUMN])}
+            for item in ordered.to_dict("records")
+        ]
+        entries.insert(position - 1, {"source": "ERA5", "member": "", DIVERGENCE_COLUMN: float(observed)})
+        info = {name: rank[name] for name in columns[:9]}
+        for index, entry in enumerate(entries):
+            bin_index = index // 13
+            records.append({**info, "position": index + 1, "bin_number": bin_index + 1,
+                            "rank_range": RANK_GROUPS[bin_index], **entry})
+    return pd.DataFrame(records, columns=columns)
+
+
+def write_ordered_bins(writer, ordered, ranks):
+    """Show thirteen entries in each of five bin columns for every verifiable case."""
+    sheet = writer.book.add_worksheet("Ordered bins")
+    sheet.hide_gridlines(2)
+    sheet.set_zoom(85)
+    sheet.freeze_panes(4, 0)
+    sheet.set_landscape()
+    sheet.fit_to_pages(1, 0)
+    book = writer.book
+    title_format = book.add_format({"bold": True, "font_size": 13, "font_color": "#17324D"})
+    note_format = book.add_format({"text_wrap": True, "valign": "top"})
+    bin_format = book.add_format({"bold": True, "bg_color": "#DDECF1", "align": "center"})
+    header_format = book.add_format({"bold": True, "text_wrap": True, "bottom": 1})
+    value_format = book.add_format({"num_format": "0.000000"})
+    era5_value_format = book.add_format({"num_format": "0.000000", "bold": True, "bg_color": "#DDF0DE"})
+    era5_label_format = book.add_format({"bold": True, "bg_color": "#DDF0DE"})
+    sheet.merge_range(0, 0, 0, 14, "Ordered 925-hPa polygon-average divergence", title_format)
+    sheet.merge_range(1, 0, 2, 14,
+                      "Each block contains 64 WN2 member values and one ERA5 value, sorted from lowest divergence "
+                      "(strongest convergence) to highest divergence. ERA5 is labeled and highlighted. "
+                      "Values are in 10⁻⁵ s⁻¹. Histogram counts use only ERA5's saved position.", note_format)
+    for bin_index in range(5):
+        start = bin_index * 3
+        sheet.set_column(start, start, 8)
+        sheet.set_column(start + 1, start + 1, 20)
+        sheet.set_column(start + 2, start + 2, 16, value_format)
+    if ordered.empty:
+        sheet.write(4, 0, "No event/polygon/lead has both ERA5 and all 64 members.")
+        return
+    keys = ["review_key", "polygon", "lead_hours"]
+    rank_lookup = {tuple(item[name] for name in keys): item for item in ranks.to_dict("records")}
+    row = 4
+    for key, group in ordered.groupby(keys, sort=False):
+        case = rank_lookup[key]
+        sheet.merge_range(row, 0, row, 14,
+                          f"Event {case['event_number']} · {case['polygon']} · {case['lead_days']}-day lead · 925 hPa",
+                          title_format)
+        sheet.merge_range(row + 1, 0, row + 1, 14,
+                          f"Valid {case['valid_time_utc']} · Initialized {case['init_time_utc']} · "
+                          f"ERA5 rank {case['era5_rank']} of 65 · "
+                          f"{'Included in all-lead histograms' if case['in_common_sample'] else 'Incomplete all-lead comparison'}")
+        for bin_index, label in enumerate(RANK_GROUPS):
+            start = bin_index * 3
+            sheet.merge_range(row + 2, start, row + 2, start + 2,
+                              f"Bin {bin_index + 1} · ranks {label}", bin_format)
+            for offset, text in enumerate(("Position", "Source", "D (10⁻⁵ s⁻¹)")):
+                sheet.write(row + 3, start + offset, text, header_format)
+        for item in group.to_dict("records"):
+            cell_row = row + 4 + (item["position"] - 1) % 13
+            cell_col = (item["bin_number"] - 1) * 3
+            label_format = era5_label_format if item["source"] == "ERA5" else None
+            number_format = era5_value_format if item["source"] == "ERA5" else value_format
+            sheet.write_number(cell_row, cell_col, item["position"], label_format)
+            source = "ERA5" if item["source"] == "ERA5" else f"WN2 sample {item['member']}"
+            sheet.write_string(cell_row, cell_col + 1, source, label_format)
+            sheet.write_number(cell_row, cell_col + 2, item[DIVERGENCE_COLUMN], number_format)
+        row += 19
+    sheet.print_area(0, 0, row - 1, 14)
 
 
 def export_verification(tables, identity, destination):
     """Write the results and a workbook for inspecting the computed ranks in Drive."""
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
+    tables = dict(tables)
+    ranks = tables["case_ranks"]
+    tables["ordered_values"] = ordered_verification_values(tables["member_values"], ranks)
+    if not ranks.empty and ranks.in_common_sample.any():
+        tables["rank_bin_counts"] = rank_histogram_counts(ranks, grouped=False)
+        tables["rank_group_counts"] = rank_histogram_counts(ranks, grouped=True)
+        tables["bin_counts"] = tables["rank_group_counts"].pivot(
+            index=["polygon", "lead_days", "matched_events"], columns="bin_number", values="case_count"
+        ).rename(columns={index + 1: f"Bin {index + 1} · ranks {label}"
+                          for index, label in enumerate(RANK_GROUPS)}).reset_index()
     atomic_json_file(destination / "calculation_settings.json", identity)
     for name, frame in tables.items():
         frame.to_csv(destination / f"{name}.csv", index=False)
@@ -301,11 +439,14 @@ def export_verification(tables, identity, destination):
     try:
         with pd.ExcelWriter(temporary_path, engine="xlsxwriter",
                             engine_kwargs={"options": {"strings_to_formulas": False, "strings_to_urls": False}}) as writer:
+            era5_format = writer.book.add_format({"bold": True, "bg_color": "#DDF0DE"})
             for name, frame in tables.items():
                 sheet = name.replace("_", " ").capitalize()
                 frame.to_excel(writer, sheet_name=sheet, index=False)
                 worksheet = writer.sheets[sheet]
                 worksheet.freeze_panes(1, 0)
+                worksheet.hide_gridlines(2)
+                worksheet.set_column(0, max(0, len(frame.columns) - 1), 18)
                 if len(frame.columns):
                     worksheet.autofilter(0, 0, len(frame), len(frame.columns) - 1)
                     for index, column in enumerate(frame.columns):
@@ -313,6 +454,13 @@ def export_verification(tables, identity, destination):
                         if not frame.empty:
                             width = max(width, int(frame[column].head(100).astype(str).str.len().max()) + 2)
                         worksheet.set_column(index, index, min(width, 55))
+                if name == "ordered_values" and not frame.empty:
+                    from xlsxwriter.utility import xl_col_to_name
+                    source_col = xl_col_to_name(frame.columns.get_loc("source"))
+                    worksheet.conditional_format(1, 0, len(frame), len(frame.columns) - 1,
+                        {"type": "formula", "criteria": "=$" + source_col + '2="ERA5"', "format": era5_format})
+                if name == "case_ranks":
+                    write_ordered_bins(writer, tables["ordered_values"], ranks)
         temporary_path.replace(destination / "ensemble_verification.xlsx")
     finally:
         temporary_path.unlink(missing_ok=True)
