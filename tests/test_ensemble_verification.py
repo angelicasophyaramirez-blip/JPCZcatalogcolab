@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import nbformat
 import numpy as np
 import pandas as pd
+import pytest
 import xarray as xr
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,11 +35,17 @@ def test_notebook37_pilot_resume_and_exports(tmp_path):
     notebook = nbformat.read(ROOT / "notebooks/37_weathernext2_ensemble_verification.ipynb", as_version=4)
     nbformat.validate(notebook)
     namespace = {"__name__": "__main__"}
+    run_cell = next(cell.source for cell in notebook.cells
+                    if cell.cell_type == "code" and cell.source.startswith("# @title 4 ·"))
+    with pytest.raises(RuntimeError, match="3c · Load verification helpers"):
+        exec(compile(run_cell, "run_cell", "exec"), namespace)
     for cell in notebook.cells:
         if cell.cell_type == "code":
             ast.parse(cell.source)
             if cell.source.startswith(("# @title 3b", "# @title 3c")):
                 exec(compile(cell.source, notebook.cells[0].id, "exec"), namespace)
+    with pytest.raises(RuntimeError, match="3d · Preview the selected catalog"):
+        exec(compile(run_cell, "run_cell", "exec"), namespace)
 
     start = pd.Timestamp("2023-01-23 19:00")
     catalog = atlas.normalise_catalog(pd.DataFrame([dict(

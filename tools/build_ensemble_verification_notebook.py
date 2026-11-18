@@ -96,12 +96,18 @@ cells = [
     STUDY_END_UTC = ''  # @param {type:"string"} # Optional exclusive UTC date.
     RUN_OVERRIDES = {}
     """),
-    cell("code", "# @title 3b · Load Notebook 36 archive helpers (run unchanged)\n" + atlas),
-    cell("code", "# @title 3c · Load verification helpers (run unchanged)\n" + verification),
+    cell("code", "# @title 3b · Load Notebook 36 archive helpers (run unchanged)\n" + atlas
+         + "\nprint('Archive helpers loaded. Continue to section 3c.')\n"),
+    cell("code", "# @title 3c · Load verification helpers (run unchanged)\n" + verification
+         + "\nprint('Verification helpers loaded. Continue to section 3d.')\n"),
     cell("code", """
     # @title 3d · Preview the selected catalog
     from IPython.display import display
 
+    if not callable(globals().get('read_catalog')) or not callable(globals().get('run_ensemble_verification')):
+        raise RuntimeError(
+            'Run sections 3b and 3c in this Notebook 37 runtime, then rerun section 3d. '
+            'Each helper cell prints a confirmation when it finishes.')
     catalog, selection_report = read_catalog(
         CATALOG_PATH, NOTEBOOK35_DIR, STUDY_START_UTC, STUDY_END_UTC or None)
     if catalog.empty:
@@ -139,9 +145,26 @@ cells = [
     The batch status records missing or failed inputs. Rerunning retries those inputs and
     reuses completed checkpoints. Cases with ERA5 and all three forecast leads contribute
     to the six histograms so that the lead comparison uses the same events.
+
+    After a runtime restart, run sections 1–3 again before section 4. Wait for the
+    confirmations from both helper cells, 3b and 3c, and the catalog preview in 3d.
+    Completed checkpoints are stored in Drive.
     """),
     cell("code", """
     # @title 4 · Read the selected forecasts and calculate ranks
+    missing_setup = []
+    if not callable(globals().get('read_catalog')):
+        missing_setup.append('3b · Load Notebook 36 archive helpers')
+    if not callable(globals().get('run_ensemble_verification')):
+        missing_setup.append('3c · Load verification helpers')
+    if any(name not in globals() for name in ('selected', 'archive', 'OUTPUT_DIR')):
+        missing_setup.append('3d · Preview the selected catalog')
+    if missing_setup:
+        raise RuntimeError(
+            'Notebook 37 setup is incomplete in this runtime. Run these cells in order, '
+            'wait for each to finish, then rerun section 4.\\n' + '\\n'.join(missing_setup)
+            + '\\nIf the runtime restarted, first rerun sections 1, 2, and 3a. '
+            'Completed Drive checkpoints will be reused.')
     tables, calculation_settings = run_ensemble_verification(selected, archive, OUTPUT_DIR)
     display(tables['batch_status'][['event_number', 'lead_days', 'era5_status', 'wn2_status',
                                     'era5_error', 'wn2_error']])
