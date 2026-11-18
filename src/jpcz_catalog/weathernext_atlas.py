@@ -408,7 +408,7 @@ def canonical_run(ds, init_time):
 
 
 def select_forecast(ds, init_time, lead_hours, member, variables, level, domain, *, level_stencil=None):
-    """Select exact member/lead/level and region before reading forecast fields."""
+    """Select an exact lead, level, and region, keeping all samples when member is None."""
     required = {"sample", "time", "lat", "lon", "init_time"}
     if not required.issubset(ds.coords):
         raise ValueError(f"WN2 schema missing coordinates: {sorted(required - set(ds.coords))}.")
@@ -420,14 +420,16 @@ def select_forecast(ds, init_time, lead_hours, member, variables, level, domain,
     if not (0 < lead_hours <= 360 and lead_hours % 6 == 0):
         raise ValueError("Expected a six-hour lead within the 15-day forecast horizon.")
     lead = pd.Timedelta(hours=lead_hours)
-    if member not in ds.sample.values:
+    if member is not None and member not in ds.sample.values:
         raise ValueError(f"Member label {member!r} is not available in this run.")
     if np.timedelta64(lead.value, "ns") not in ds.time.values:
         raise ValueError(f"Exact {lead_hours}-hour lead is unavailable; no nearest forecast was substituted.")
     missing = set(variables) - set(ds.data_vars)
     if missing:
         raise ValueError(f"Requested fields unavailable: {sorted(missing)}.")
-    snap = ds[list(variables)].sel(sample=member, time=lead)
+    snap = ds[list(variables)].sel(time=lead)
+    if member is not None:
+        snap = snap.sel(sample=member)
     target = init_time + lead
     if "datetime" in snap.coords and (snap.datetime.size != 1 or utc_naive(snap.datetime.values.reshape(-1)[0]) != target):
         raise ValueError("WN2 datetime is inconsistent with initialization + lead.")
@@ -458,11 +460,12 @@ def select_forecast(ds, init_time, lead_hours, member, variables, level, domain,
         actual = snap[coordinate].values
         if float(np.min(actual)) > lo + .26 or float(np.max(actual)) < hi - .26:
             raise ValueError(f"Forecast grid does not cover requested {coordinate} bounds.")
+    sample_dims = ("sample",) if member is None else ()
+    pressure_dims = ("level",) if level_stencil is not None else ()
+    order = sample_dims + pressure_dims + ("lat", "lon")
     for name in variables:
-        expected_dims = {"level", "lat", "lon"} if level_stencil is not None else {"lat", "lon"}
-        if set(snap[name].dims) != expected_dims:
+        if set(snap[name].dims) != set(order):
             raise ValueError(f"Unexpected remaining dimensions for {name}: {snap[name].dims}.")
-    order = ("level", "lat", "lon") if level_stencil is not None else ("lat", "lon")
     return snap.transpose(*order).sortby("lat").sortby("lon")
 
 
@@ -530,7 +533,10 @@ def derive_field(snap, spec, domain):
     if spec.key == "divergence":
         values = (np.gradient(u, lam, axis=-1, edge_order=2)
                   + np.gradient(v * cosphi, phi, axis=-2, edge_order=2)) / (EARTH_RADIUS_M * cosphi) * 1e5
+        dims = snap.u_component_of_wind.dims
     elif spec.key == "ertel_pv":
+        if "sample" in snap.dims:
+            raise ValueError("Select one member for Ertel PV.")
         pressure = snap.level.values.astype(float) * 100.0
         if len(pressure) != 3 or np.any(np.diff(pressure) <= 0):
             raise ValueError("PV needs three distinct, increasing pressure levels.")
@@ -546,9 +552,10 @@ def derive_field(snap, spec, domain):
         pv = -STANDARD_GRAVITY * (u_p * theta_y - v_p * theta_x + (zeta + coriolis) * theta_p)
         index = list(snap.level.values).index(spec.level)
         values = pv[index] * 1e6
+        dims = ("lat", "lon")
     else:
         raise ValueError(f"Unknown derived diagnostic {spec.key}.")
-    result = xr.Dataset({"value": (("lat", "lon"), values)}, coords={"lat": snap.lat, "lon": snap.lon})
+    result = xr.Dataset({"value": (dims, values)}, coords={dim: snap[dim] for dim in dims})
     west, east, south, north = domain
     result = result.sel(lat=slice(south, north), lon=slice(west, east)).reset_coords(drop=True)
     result.value.attrs = {"units": spec.units, "long_name": spec.title}
