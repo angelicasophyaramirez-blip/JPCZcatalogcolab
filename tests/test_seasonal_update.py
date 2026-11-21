@@ -160,3 +160,73 @@ def test_inspection_does_not_assume_a_merge_version(tmp_path):
     merged.to_csv(tmp_path / update.MERGED_NAME, index=False)
     with pytest.raises(ValueError, match='does not match a 12-hour merge'):
         update.inspect_catalog(tmp_path)
+
+
+def test_real_chunked_calculation_resumes_after_crash_and_matches_notebook04(tmp_path, monkeypatch):
+    """Exercise real MetPy and NetCDF checkpoints, with cloud winds replaced by a small local grid."""
+    from jpcz_catalog import historical_catalog as history
+    from jpcz_catalog.detect import compute_polygon_mean_divergence_series, prepare_detection_geometry
+    seed_catalog(tmp_path)
+    times = pd.date_range('2026-11-01', periods=54, freq='h')
+    lon, lat = np.arange(128., 138.1, .5), np.arange(42., 34.9, -.5)
+    shape = (len(times), len(lat), len(lon))
+    amplitude = (2. + np.sin(np.arange(len(times)) / 4.))[:, None, None]
+    u = np.broadcast_to(-8. * amplitude * (lon - 132.)[None, None, :], shape).copy()
+    v = np.broadcast_to(.2 * amplitude * (lat - 38.)[None, :, None], shape).copy()
+    winds = xr.Dataset({'u_component_of_wind': (('time', 'latitude', 'longitude'), u),
+                        'v_component_of_wind': (('time', 'latitude', 'longitude'), v)},
+                       coords={'time': times, 'latitude': lat, 'longitude': lon})
+    geometry = prepare_detection_geometry(winds.longitude, winds.latitude, update.JPCZ_POLYGON_VERTICES)
+    expected_hourly, expected_d12, _ = compute_polygon_mean_divergence_series(winds.copy(deep=True), geometry=geometry)
+    archive = fake_archive(str(times[-1]), stable='2026-08-31T23:00')
+    archive.attrs['last_updated'] = '2026-11-10T12:00:00Z'
+    monkeypatch.setattr(update, 'subset_era5_window', lambda ds, start, end, **kw: winds.sel(time=slice(start, end)))
+    real_divergence = history.mpcalc.divergence
+    first_batches = []
+    def fail_after_checkpoint(u, *args, **kwargs):
+        first_batches.append(len(u))
+        if len(first_batches) == 5:
+            raise RuntimeError('simulated runtime crash')
+        return real_divergence(u, *args, **kwargs)
+    monkeypatch.setattr(history.mpcalc, 'divergence', fail_after_checkpoint)
+    args = dict(update_start='2026-11-01', requested_end=str(times[-1]), progress=lambda _: None)
+    original_catalog = (tmp_path / update.MERGED_NAME).read_bytes()
+    with pytest.raises(RuntimeError, match='simulated runtime crash'):
+        update.update_catalog(tmp_path, archive, **args)
+    assert first_batches == [6]*5
+    assert (tmp_path / update.MERGED_NAME).read_bytes() == original_catalog
+    saved = list((tmp_path / 'seasonal_updates/hourly').glob('era5t_*/*.nc'))
+    assert len(saved) == 1
+    with xr.open_dataarray(saved[0]) as partial:
+        assert partial.sizes['time'] == 24
+        np.testing.assert_allclose(partial.values, expected_hourly.values[:24], rtol=1e-12, atol=1e-15)
+    resumed_batches = []
+    def count_remaining(u, *args, **kwargs):
+        resumed_batches.append(len(u))
+        return real_divergence(u, *args, **kwargs)
+    monkeypatch.setattr(history.mpcalc, 'divergence', count_remaining)
+    update.update_catalog(tmp_path, archive, **args)
+    assert resumed_batches == [6]*5  # only hours 24..53, not all 54 again
+    with xr.open_dataarray(tmp_path / 'seasonal_updates/monthly/2026-11_D12.nc') as saved_d12:
+        np.testing.assert_allclose(saved_d12.values, expected_d12.dropna('time').values, rtol=1e-12, atol=1e-15)
+        assert saved_d12.attrs['source_product'] == 'ERA5T'
+    # A completed month in the same archive revision needs no wind calculation.
+    update.update_catalog(tmp_path, archive, **args)
+    assert len(resumed_batches) == 5
+    # A changed publication must recompute earlier hours even if availability is unchanged.
+    archive.attrs['last_updated'] = '2026-11-10T18:00:00Z'
+    update.update_catalog(tmp_path, archive, **args)
+    assert len(resumed_batches) == 14  # fresh 54 hours, nine six-hour batches
+    assert len(list((tmp_path / 'seasonal_updates/hourly').glob('era5t_*/*.nc'))) == 2
+    # Finalization cannot reuse preliminary wind calculations.
+    archive.attrs['valid_time_stop'] = str(times[-1])
+    update.update_catalog(tmp_path, archive, **args)
+    assert len(resumed_batches) == 23
+    with xr.open_dataarray(tmp_path / 'seasonal_updates/monthly/2026-11_D12.nc') as saved_d12:
+        assert saved_d12.attrs['source_product'] == 'ERA5'
+
+
+def test_chunk_checkpoint_interval_is_validated_before_any_drive_mutation(tmp_path):
+    with pytest.raises(ValueError, match='divisible'):
+        update.update_catalog(tmp_path, xr.Dataset(), chunk_hours=5, checkpoint_every_hours=24)
+    assert not (tmp_path / 'seasonal_updates').exists()

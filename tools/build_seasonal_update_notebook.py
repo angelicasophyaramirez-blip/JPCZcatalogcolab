@@ -55,7 +55,8 @@ implementation choices. Vortex labels are a separate review in Notebook 35, not 
 
 Your actual Drive CSV supplies the count (whether it is 275 or another number). Old events
 and threshold files are backed up before the first update. New thresholds are never fitted to
-the new winter. Scans checkpoint compact scalar series; a failed month cannot promote a partial catalog.
+the new winter. Winds stay lazy until regional, 925-hPa, short time batches are selected.
+Scans save compact scalar progress to Drive within each month; a failed month cannot promote a partial catalog.
 '''),
 cell('code', '''
 # @title 1 · Install dependencies
@@ -75,7 +76,9 @@ from IPython.display import display
 DRIVE_ROOT = Path('/content/drive/MyDrive/JPCZcatalog_outputs')
 UPDATE_START_UTC = ''  # Optional first-run month boundary; otherwise infer from a complete saved month.
 UPDATE_THROUGH_UTC = ''  # Inclusive UTC hour; blank means now. Example: '2026-11-19T23:00:00Z'.
-ALLOW_ERA5T = True  # Preliminary reference, explicitly marked and refreshed on rerun.
+ALLOW_ERA5T = True  # Preliminary reference; check the archive revision before reusing calculations.
+CHUNK_HOURS = 6  # Lower to 1 or 2 for a smaller processing batch.
+CHECKPOINT_EVERY_HOURS = 24  # Data hours, not wall-clock hours; use a multiple of CHUNK_HOURS.
 '''),
 cell('code', loader),
 cell('markdown', '''
@@ -116,8 +119,20 @@ it with the frozen baseline, rather than appending duplicate rows.
 ARCO's published data stop controls what can be read. Coordinates alone do not prove fields
 are populated. An event on November 19 will wait for reference data; missing days are reported
 as pending. [ARCO documentation](https://github.com/google-research/arco-era5#overview) describes
-roughly one week of ERA5T delay and about three months for final ERA5. Preliminary months
-are reread on each run, and again when final data replace them.
+roughly one week of ERA5T delay and about three months for final ERA5.
+
+**RAM and crash recovery:** the default processes six data hours at a time, limits Zarr
+read concurrency, and saves hourly polygon means to Drive after every 24 processed data
+hours (and at the end of a partial month). This interval is data coverage, not 24 hours
+of runtime. Completed monthly D12 series, frozen thresholds, backups, and CSVs also persist
+under `JPCZcatalog_outputs/seasonal_updates/`. After a disconnect, reconnect Drive and rerun
+the notebook. It validates saved progress and resumes from the last checkpoint.
+
+For ERA5T, resuming requires the same published `last_updated` and availability metadata.
+A changed archive revision uses fresh partial files; final ERA5 also replaces preliminary
+calculations. If `last_updated` is absent, progress is still saved, but it cannot safely be
+reused in another run. No full month of wind maps is retained in memory. Actual peak RAM
+still depends on the archive's compressed source chunks and the Colab runtime.
 '''),
 cell('code', '''
 # @title 5 · Run the seasonal update and save the shared catalog
@@ -125,7 +140,8 @@ manifest = initialize_update(DRIVE_ROOT, UPDATE_START_UTC or None)
 print('Frozen update start:', manifest['update_start'])
 print('Threshold source:', manifest['threshold_source'])
 result = update_catalog(DRIVE_ROOT, era5, update_start=UPDATE_START_UTC or None,
-                        requested_end=UPDATE_THROUGH_UTC or None, allow_era5t=ALLOW_ERA5T)
+                        requested_end=UPDATE_THROUGH_UTC or None, allow_era5t=ALLOW_ERA5T,
+                        chunk_hours=CHUNK_HOURS, checkpoint_every_hours=CHECKPOINT_EVERY_HOURS)
 print(json.dumps(result, indent=2))
 status_path = DRIVE_ROOT / 'seasonal_updates/monthly_scan_status.csv'
 if status_path.exists():

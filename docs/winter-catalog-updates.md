@@ -61,6 +61,39 @@ allow recovery if Drive disconnects while the two canonical files are being
 replaced. A scientific/read failure during the scan leaves canonical files
 untouched. The two file replacements are not a distributed transaction.
 
+## Cloud reads, RAM, and recovery after a crash
+
+Notebook 38 opens ARCO lazily (`chunks=None`), then selects the time range,
+925-hPa winds, and regional domain before loading fields. It processes six
+data hours per batch by default and limits Zarr read concurrency to one, with
+two worker threads. The polygon means are retained; full monthly wind or
+divergence maps are not. Source storage chunks still span the globe and all
+levels, so actual peak RAM depends on decoding those chunks and has not been
+profiled in the user's Colab runtime. `CHUNK_HOURS` can be lowered to one or two.
+
+Hourly scalar progress is saved to mounted Drive after every 24 processed data
+hours and at the end of the requested monthly slice. This means 24 data hours,
+not 24 wall-clock hours. `CHECKPOINT_EVERY_HOURS` can be lowered, using a multiple
+of `CHUNK_HOURS`. Individual NetCDF checkpoint writes use a temporary sibling
+and file replacement. Restart the notebook and reconnect the same Drive to
+resume: the hourly prefix must have matching times and finite scalar values.
+Only work since the last completed checkpoint needs to be repeated for the
+same source snapshot.
+
+Final ERA5 partials live in `seasonal_updates/hourly/`. Preliminary ERA5T
+partials live in a revision-specific subdirectory there. Their revision key
+includes the published `last_updated`, final stop, and preliminary stop metadata.
+A restart using that same source revision resumes the saved prefix; a changed
+revision uses a new prefix because earlier preliminary winds may have changed.
+Finalization also recomputes preliminary months. If `last_updated` is absent,
+progress is saved but reuse across runs is disabled because the source revision
+cannot be verified. Old revision scalar files are small and remain available.
+
+Completed D12 series live in `seasonal_updates/monthly/`. A completed slice with
+unchanged source revision and end time reuses its scalar file without reading
+winds again. Catalog CSVs, frozen thresholds, baseline backups, and scan status
+also stay in Drive. No full historical ERA5 rebuild is needed for normal updates.
+
 ## A November 19 event
 
 Search November 19–20 UTC in Notebook 38 after scanning through the available
@@ -72,9 +105,10 @@ data have not arrived is not declared a non-event.
 specifies inclusive `valid_time_stop` for final ERA5, `valid_time_stop_era5t` for
 preliminary ERA5T, roughly one week of preliminary-data delay, and roughly three
 months for final data. Read those metadata each run; allocated time coordinates
-may extend beyond populated fields. Preliminary months and verification targets
-are refreshed on every rerun and again after finalization. Completed WN2
-checkpoints remain reusable.
+may extend beyond populated fields. Notebook 38 checks the archive revision on
+each newly opened source and refreshes preliminary months when that revision
+changes or the month becomes final. Notebook 37 refreshes preliminary verification
+targets on each verification run. Completed WN2 checkpoints remain reusable.
 
 For a target at November 19 00 UTC, request WN2 initializations November 18,
 14, and 9 at 00 UTC for the 1-, 5-, and 10-day leads. The real event's target
@@ -144,3 +178,10 @@ strict threshold equality, incomplete cases, unchecked vortex labels, the exact
 November 19 initialization dates, standalone notebook compilation, and the
 existing 64-member verification/checkpoint/export workflow. Live private WN2
 and Drive retrieval require the user's Colab Google authentication.
+
+A simulated mid-month crash test uses the actual MetPy calculation and NetCDF
+files. It confirms resumption after 24 saved hours, six-hour processing batches,
+reuse of a completed unchanged ERA5T slice, and recalculation after an archive
+revision or finalization. Its resumed hourly and D12 values match Notebook 04's
+whole-window calculation on the same synthetic wind grid. This does not replace
+an event-for-event comparison on real historical data.

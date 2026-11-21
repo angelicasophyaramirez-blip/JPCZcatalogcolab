@@ -5,10 +5,12 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
 import xarray as xr
+import zarr
 
 from .config import JPCZ_POLYGON_VERTICES, ARCO_ERA5_ZARR_STORE
 from .detect import count_events_from_threshold, merge_nearby_events, prepare_detection_geometry, threshold_from_std
@@ -165,13 +167,19 @@ def availability(ds, allow_era5t=False):
     return max(stops).floor('h')
 
 
-def update_catalog(root, ds, *, update_start=None, requested_end=None, allow_era5t=True, progress=print):
+def update_catalog(root, ds, *, update_start=None, requested_end=None, allow_era5t=True,
+                   chunk_hours=6, checkpoint_every_hours=24, progress=print):
     """Scan only the extension, checkpoint monthly scalars, then refresh the shared CSVs.
 
     requested_end is inclusive. A pending tail is reported, not filled or counted as no events.
-    Preliminary months are re-read on each run and once more when finalized.
+    Preliminary checkpoints resume only under the same published archive revision.
+    Changed revisions and finalization trigger a fresh calculation of preliminary months.
     """
     root = Path(root)
+    if (not isinstance(chunk_hours, int) or chunk_hours < 1
+            or not isinstance(checkpoint_every_hours, int) or checkpoint_every_hours < chunk_hours
+            or checkpoint_every_hours % chunk_hours):
+        raise ValueError('Use positive integer chunk hours and a checkpoint interval divisible by chunk hours.')
     manifest = initialize_update(root, update_start)
     folder = root / 'seasonal_updates'
     start = pd.Timestamp(manifest['update_start'])
@@ -179,6 +187,13 @@ def update_catalog(root, ds, *, update_start=None, requested_end=None, allow_era
     requested = pd.to_datetime(requested_end or pd.Timestamp.now(tz='UTC').floor('h'), utc=True).tz_localize(None)
     stop = min(requested, available)
     stable_stop = pd.to_datetime(ds.attrs['valid_time_stop'], utc=True).tz_localize(None)
+    # A reconnect to the same source snapshot can safely resume partial ERA5T scalars.
+    # A new publication can revise earlier hours, so its partial files must be separate.
+    last_updated = str(ds.attrs.get('last_updated', '')).strip()
+    revision_metadata = {name: str(ds.attrs.get(name, '')) for name in
+                         ('last_updated', 'valid_time_stop', 'valid_time_stop_era5t')}
+    preliminary_revision = (hashlib.sha256(json.dumps(revision_metadata, sort_keys=True).encode()).hexdigest()[:16]
+                            if last_updated else 'unversioned_' + uuid4().hex)
     thresholds = pd.read_csv(folder / 'frozen_thresholds.csv').set_index('month')['threshold_s-1']
     baseline = read_events(folder / ('baseline_' + RAW_NAME))
     # Do not erase later extensions if somebody requests an earlier end date on a rerun.
@@ -197,12 +212,15 @@ def update_catalog(root, ds, *, update_start=None, requested_end=None, allow_era
         if end < begin + pd.Timedelta(hours=11):
             continue
         product = 'ERA5' if end <= stable_stop else 'ERA5T'
+        revision = 'final' if product == 'ERA5' else preliminary_revision
         stamp = str(period)
         path = folder / 'monthly' / f'{stamp}_D12.nc'
         cached = None
         if path.exists():
             with xr.open_dataarray(path) as saved:
-                if (saved.attrs.get('source_product') == 'ERA5' and product == 'ERA5'
+                same_source = (saved.attrs.get('source_product') == product and
+                               (product == 'ERA5' or saved.attrs.get('source_revision') == revision))
+                if (same_source
                         and saved.attrs.get('scanned_through') == end.isoformat()):
                     cached = saved.load()
         if cached is None:
@@ -212,15 +230,25 @@ def update_catalog(root, ds, *, update_start=None, requested_end=None, allow_era
             if not pd.DatetimeIndex(winds.time.values).equals(expected):
                 raise ValueError(f'{stamp}: missing hourly winds; catalog was not updated.')
             geometry = prepare_detection_geometry(winds.longitude, winds.latitude, JPCZ_POLYGON_VERTICES)
-            # Final data resume; preliminary scalar values must be refreshed when the archive is revised.
-            partial = folder / 'hourly' / f'{stamp}.nc' if product == 'ERA5' else None
-            hourly, d12 = compute_polygon_mean_divergence_series_chunked(
-                winds, geometry=geometry, chunk_hours=6, progress_every_hours=24,
-                progress_label=stamp, hourly_checkpoint_path=partial)
+            partial_root = folder / 'hourly'
+            if product == 'ERA5T':
+                partial_root = partial_root / f'era5t_{revision}'
+                if not last_updated:
+                    progress('  No archive last_updated marker: saving progress, but a later run must '
+                             'recalculate preliminary data because their revision cannot be verified.')
+            partial = partial_root / f'{stamp}.nc'
+            # Source chunks span the globe and all levels even after regional selection.
+            # Limit their decoding concurrency as well as the regional processing batch.
+            with zarr.config.set({'async.concurrency': 1, 'threading.max_workers': 2}):
+                hourly, d12 = compute_polygon_mean_divergence_series_chunked(
+                    winds, geometry=geometry, chunk_hours=chunk_hours,
+                    progress_every_hours=checkpoint_every_hours,
+                    progress_label=stamp, hourly_checkpoint_path=partial)
             if not np.isfinite(hourly.values).all():
                 raise ValueError(f'{stamp}: nonfinite winds/divergence; catalog was not updated.')
             cached = d12.dropna('time')
-            cached.attrs.update(source_product=product, scanned_through=end.isoformat())
+            cached.attrs.update(source_product=product, source_revision=revision, scanned_through=end.isoformat(),
+                                archive_last_updated=last_updated)
             write_dataarray_atomic(cached, path)
         events = count_events_from_threshold(cached, float(thresholds[period.month]))
         if not events.empty:
@@ -233,7 +261,7 @@ def update_catalog(root, ds, *, update_start=None, requested_end=None, allow_era
             events['catalog_provisional'] = (events.event_end + pd.Timedelta(hours=12) >= stop) | (product == 'ERA5T')
             event_frames.append(events)
         inventory.append({'month': stamp, 'scanned_through': str(end), 'source_product': product,
-                          'events': len(events), 'checkpoint': str(path)})
+                          'source_revision': revision, 'events': len(events), 'checkpoint': str(path)})
     extension = pd.concat(event_frames, ignore_index=True) if event_frames else baseline.iloc[:0].copy()
     combined = pd.concat([baseline, extension], ignore_index=True).sort_values('event_start').reset_index(drop=True)
     merged = merge_nearby_events(combined, max_gap_hours=12)
@@ -272,6 +300,7 @@ def update_catalog(root, ds, *, update_start=None, requested_end=None, allow_era
               'requested_through': requested.isoformat(), 'merged_events': len(merged),
               'new_or_revised': int(changes.update_status.ne('unchanged').sum()),
               'provisional_events': int(merged.catalog_provisional.sum()), 'allow_era5t': allow_era5t,
+              'processing_chunk_hours': chunk_hours, 'checkpoint_every_hours': checkpoint_every_hours,
               'detector': manifest['detector']}
     previous.write_text(json.dumps(result, indent=2) + '\n')
     progress(str(result))
