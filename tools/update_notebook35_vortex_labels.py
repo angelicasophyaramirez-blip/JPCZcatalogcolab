@@ -103,6 +103,16 @@ for cell in notebook["cells"]:
                    "The event details and export metadata record the scan status. "
                    "To regenerate a figure, click **Refresh catalog**, select the event and time, and click **Load maps**. "
                    "For the −12 h, peak, and +12 h plots, click **Show 3 times**.\n")
+        source += ("\n\n**New winter events:** start with "
+                   "[Notebook 38 · update and search the catalog](https://colab.research.google.com/github/"
+                   "angelicasophyaramirez-blip/JPCZcatalogcolab/blob/codex/notebook36-weathernext2/"
+                   "notebooks/38_update_winter_catalog.ipynb). It extends the established Notebook 04 "
+                   "hourly ERA5 / trailing-D12 detector using frozen monthly thresholds and Notebook 06's "
+                   "12-hour merge. Notebook 34 uses a separate historical baseline. After updating, "
+                   "click **Refresh catalog** here and screen the new cases. Unchecked/failed screens "
+                   "remain Unknown in Notebook 37's verification strata. IMERG Final availability "
+                   "does not gate ERA5/WN2 verification. Reload Notebook 37 in Catalog mode to regenerate "
+                   "rank histograms and reliability diagrams from the current event inventory.\n")
     if cell["cell_type"] == "code":
         compile(source, 'notebook35_cell', 'exec')
     cell["source"] = source.splitlines(keepends=True)

@@ -15,7 +15,7 @@ import zarr
 
 from .weathernext_atlas import (
     FIELD_PRESETS, LEAD_HOURS, POLYGONS, diagnostic_domain, diagnostic_settings,
-    derive_field, forecast_requests, iso_utc, select_forecast, utc_naive,
+    derive_field, forecast_requests, iso_utc, select_forecast, utc_naive, vortex_classification,
 )
 
 ERA5_STORE = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
@@ -52,9 +52,17 @@ def open_verification_era5():
     return xr.open_zarr(ERA5_STORE, chunks=None, storage_options={"token": "anon"})
 
 
-def era5_polygon_values(valid_time, era5):
+def era5_polygon_values(valid_time, era5, *, allow_era5t=False):
     """Derive divergence from the exact ERA5 925-hPa wind snapshot."""
     target = utc_naive(valid_time)
+    stable = era5.attrs.get('valid_time_stop')
+    preliminary = era5.attrs.get('valid_time_stop_era5t')
+    product = 'ERA5'
+    if stable and target > utc_naive(stable):
+        if not allow_era5t or not preliminary or target > utc_naive(preliminary):
+            raise ValueError(f'ERA5 pending for {iso_utc(target)}; final through {stable}; '
+                             f'ERA5T through {preliminary}. No nearest time is substituted.')
+        product = 'ERA5T'
     winds = era5[list(DIVERGENCE_SPEC.variables)].sel(time=target, level=DIVERGENCE_SPEC.level)
     winds = winds.rename({"latitude": "lat", "longitude": "lon"})
     west, east, south, north = diagnostic_domain(winds, VERIFICATION_DOMAIN)
@@ -73,6 +81,7 @@ def era5_polygon_values(valid_time, era5):
     field = derive_field(winds, DIVERGENCE_SPEC, VERIFICATION_DOMAIN).value
     means, counts = polygon_divergence(field)
     return {"valid_time": iso_utc(target), "source_store": ERA5_STORE, "polygon_cells": counts,
+            "reference_product": product, "archive_last_updated": str(era5.attrs.get('last_updated', '')),
             "values": {region: float(value) for region, value in means.items()}}
 
 
@@ -172,10 +181,12 @@ def case_identity(row):
         "catalog_peak_D12_1e5_s-1": row["event_peak_D_1e5_s-1"],
         "vortex_label": row.get("vortex_plot_label", ""),
         "vortex_scan_status": row.get("vortex_scan_status", ""),
+        "vortex_classification": row.get('vortex_classification', vortex_classification(row)),
     }
 
 
-def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_verification_era5, progress=print):
+def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_verification_era5,
+                              allow_era5t=False, progress=print):
     """Checkpoint one ERA5 target and each WN2 run/lead independently."""
     identity = checkpoint_identity(archive)
     signature = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
@@ -190,14 +201,25 @@ def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_
         reference = None
         try:
             progress("  ERA5: opening the reference archive and reading one 925-hPa wind snapshot")
+            reference_path = cache / f"era5_{stamp}.json"
+            # Preliminary data can change. Refresh it on every run, including when it
+            # has become final. Forecast checkpoints remain independent and reusable.
+            if reference_path.is_file():
+                try:
+                    saved = json.loads(reference_path.read_text())
+                    if saved['data'].get('reference_product') == 'ERA5T':
+                        reference_path.unlink()
+                except (KeyError, ValueError, TypeError):
+                    pass
             reference, cached = checkpoint(
-                cache / f"era5_{stamp}.json", {"valid_time": event["valid_time_utc"]},
-                lambda: era5_polygon_values(target, era5_reader()),
+                reference_path, {"valid_time": event["valid_time_utc"]},
+                lambda: era5_polygon_values(target, era5_reader(), allow_era5t=allow_era5t),
             )
             reference_rows.extend([
                 {**event, "polygon": region, "pressure_hpa": DIVERGENCE_SPEC.level,
                  DIVERGENCE_COLUMN: reference["values"][region],
-                 "polygon_cells": reference["polygon_cells"][region], "source_store": reference["source_store"]}
+                 "polygon_cells": reference["polygon_cells"][region], "source_store": reference["source_store"],
+                 "reference_product": reference.get('reference_product', 'ERA5')}
                 for region in POLYGONS
             ])
             ref_status = "cached" if cached else "computed"
@@ -213,7 +235,8 @@ def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_
         for request in forecast_requests(row).to_dict("records"):
             lead = request["lead_hours"]
             timing = {"lead_hours": lead, "lead_days": request["lead_days"], "init_time_utc": iso_utc(request["init_time"])}
-            status = {**event, **timing, "era5_status": ref_status, "era5_error": ref_error}
+            status = {**event, **timing, "era5_status": ref_status, "era5_error": ref_error,
+                      "reference_product": reference.get('reference_product', 'ERA5') if reference else 'pending'}
             try:
                 forecast, cached = checkpoint(
                     cache / f"wn2_{stamp}_lead{lead:03d}h.json",
@@ -236,6 +259,7 @@ def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_
                         observed = reference["values"][region]
                         rank = observation_rank(values, observed, f"{row.review_key}|{lead}|{region}")
                         case_ranks.append({**info, "member_count": len(members),
+                                           "reference_product": reference.get('reference_product', 'ERA5'),
                                            "era5_divergence_1e5_s-1": observed,
                                            "member_min_1e5_s-1": values.min(), "member_mean_1e5_s-1": values.mean(),
                                            "member_max_1e5_s-1": values.max(), **rank})
@@ -281,7 +305,7 @@ def rank_histogram_counts(ranks, *, grouped=True):
     return pd.DataFrame(records)
 
 
-def plot_rank_histograms(ranks, *, grouped=True):
+def plot_rank_histograms(ranks, *, grouped=True, title_suffix='All events'):
     """Show either all 65 ranks or five groups, with the same cases at each lead."""
     import matplotlib.pyplot as plt
 
@@ -311,7 +335,7 @@ def plot_rank_histograms(ranks, *, grouped=True):
             ax.yaxis.get_major_locator().set_params(integer=True)
             if c == 0:
                 ax.set_ylabel("Number of events")
-    fig.suptitle(f"925-hPa polygon-average divergence at the onset target · {n_events} matched "
+    fig.suptitle(f"{title_suffix} · 925-hPa polygon-average divergence at the onset target · {n_events} matched "
                  f"{'event' if n_events == 1 else 'events'}\n"
                  f"{'13 ranks' if grouped else '1 rank'} per bar · dashed line = uniform rank reference\n"
                  "Lower rank = ERA5 more convergent relative to forecasts · Higher rank = ERA5 less convergent")
@@ -424,6 +448,9 @@ def export_verification(tables, identity, destination):
     tables = dict(tables)
     ranks = tables["case_ranks"]
     tables["ordered_values"] = ordered_verification_values(tables["member_values"], ranks)
+    # A previously complete run must not leave count tables that describe an old sample.
+    for name in ('rank_bin_counts', 'rank_group_counts', 'bin_counts'):
+        (destination / f'{name}.csv').unlink(missing_ok=True)
     if not ranks.empty and ranks.in_common_sample.any():
         tables["rank_bin_counts"] = rank_histogram_counts(ranks, grouped=False)
         tables["rank_group_counts"] = rank_histogram_counts(ranks, grouped=True)
@@ -465,3 +492,189 @@ def export_verification(tables, identity, destination):
     finally:
         temporary_path.unlink(missing_ok=True)
     return destination
+
+
+def verification_subset(tables, group='All'):
+    """Use completed vortex screens for strata; retain unchecked cases as Unknown."""
+    ranks = tables['case_ranks'].copy()
+    if ranks.empty:
+        return ranks
+    classification = ranks.get('vortex_classification', pd.Series('', index=ranks.index))
+    checked = ranks.vortex_scan_status.eq('complete')
+    groups = np.select([checked & classification.eq('Vortex'), checked & classification.eq('Non-vortex')],
+                       ['Vortex', 'Non-vortex'], default='Unknown')
+    ranks['verification_group'] = groups
+    if group not in ('All', 'Vortex', 'Non-vortex', 'Unknown'):
+        raise ValueError('Choose All, Vortex, Non-vortex, or Unknown.')
+    return ranks if group == 'All' else ranks.loc[ranks.verification_group.eq(group)].copy()
+
+
+def scheduled_verification_catalog(start, end, *, interval_hours=24, months=(11, 12, 1, 2)):
+    """Outcome-independent, half-open UTC schedule including crossings and non-crossings."""
+    start, end = utc_naive(start), utc_naive(end)
+    if start >= end or interval_hours not in (6, 12, 24):
+        raise ValueError('Use start < exclusive end and a 6, 12, or 24 hour schedule.')
+    if start != start.floor('6h') or end != end.floor('6h'):
+        raise ValueError('Schedule endpoints must be exact six-hour UTC times.')
+    times = pd.date_range(start, end, freq=f'{interval_hours}h', inclusive='left')
+    times = times[times.month.isin(months)]
+    if times.empty:
+        raise ValueError('The schedule contains no winter verification targets.')
+    frame = pd.DataFrame({'event_start': times, 'event_end': times, 'event_peak': times,
+                          'event_number': np.arange(1, len(times) + 1), 'target_valid_time': times,
+                          'onset_offset_hours': 0., 'event_peak_D_1e5_s-1': np.nan,
+                          'vortex_plot_label': '', 'vortex_scan_status': 'not_applicable'})
+    frame['review_key'] = [f'scheduled|{iso_utc(t)}' for t in times]
+    return frame
+
+
+def reliability_probabilities(members, ranks, thresholds, *, sample='event_conditioned'):
+    """P(D925 snapshot < threshold) from all 64 members and binary ERA5 outcome.
+
+    This is instantaneous polygon convergence, not the hourly trailing-D12 JPCZ detector.
+    Only the common all-lead sample enters, exactly as in the rank histograms.
+    """
+    if sample not in ('event_conditioned', 'scheduled_winter'):
+        raise ValueError('Unknown reliability sampling design.')
+    if set(thresholds) != set(POLYGONS) or not np.isfinite(list(thresholds.values())).all():
+        raise ValueError('Supply one finite snapshot threshold (10^-5 s^-1) per polygon.')
+    keys = ['review_key', 'polygon', 'lead_hours']
+    columns = [*keys, 'lead_days', 'valid_time_utc', 'event_number', 'vortex_label', 'vortex_scan_status',
+               'sample', 'threshold_1e5_s-1', 'member_count', 'forecast_probability', 'observed', 'brier_score']
+    if ranks.empty:
+        return pd.DataFrame(columns=columns)
+    if ranks.duplicated(keys).any():
+        raise ValueError('Duplicate verification cases would overweight reliability.')
+    groups = {key: frame for key, frame in members.groupby(keys, sort=False)}
+    rows = []
+    for row in ranks.loc[ranks.in_common_sample].to_dict('records'):
+        key = tuple(row[name] for name in keys)
+        frame = groups.get(key)
+        if frame is None or len(frame) != ENSEMBLE_SIZE or frame.member.astype(str).nunique() != ENSEMBLE_SIZE:
+            raise ValueError(f'Reliability requires 64 distinct members for {key}.')
+        values = frame[DIVERGENCE_COLUMN].to_numpy(dtype=float)
+        observed_value = float(row['era5_divergence_1e5_s-1'])
+        if not np.isfinite(values).all() or not np.isfinite(observed_value):
+            raise ValueError('Reliability inputs must be finite.')
+        threshold = float(thresholds[row['polygon']])
+        probability = float(np.mean(values < threshold))
+        observed = int(observed_value < threshold)
+        rows.append({**{name: row.get(name, '') for name in columns[:8]},
+                     'sample': sample, 'threshold_1e5_s-1': threshold, 'member_count': ENSEMBLE_SIZE,
+                     'forecast_probability': probability, 'observed': observed,
+                     'brier_score': (probability - observed)**2})
+    return pd.DataFrame(rows, columns=columns)
+
+
+def reliability_bin_counts(probabilities, *, n_bins=10):
+    """Fixed [left,right) bins, final bin closed at 1, with empty bins retained."""
+    if not isinstance(n_bins, int) or n_bins < 2:
+        raise ValueError('Use at least two probability bins.')
+    rows = []
+    for region in POLYGONS:
+        for lead in LEAD_HOURS:
+            subset = probabilities.loc[probabilities.polygon.eq(region) & probabilities.lead_hours.eq(lead)]
+            if subset.empty:
+                continue
+            p = subset.forecast_probability.to_numpy(dtype=float)
+            y = subset.observed.to_numpy(dtype=float)
+            if not np.isfinite(p).all() or ((p < 0) | (p > 1)).any() or not np.isin(y, (0, 1)).all():
+                raise ValueError('Need probabilities in [0,1] and binary observed outcomes.')
+            bins = np.minimum((p * n_bins).astype(int), n_bins - 1)
+            for index in range(n_bins):
+                mask = bins == index
+                n, hits = int(mask.sum()), int(y[mask].sum())
+                frequency = hits / n if n else np.nan
+                # Pointwise Wilson 95% binomial intervals; serial dependence is not modeled.
+                z = 1.959963984540054
+                denominator = 1 + z*z/n if n else np.nan
+                center = (frequency + z*z/(2*n)) / denominator if n else np.nan
+                half = z * np.sqrt(frequency*(1-frequency)/n + z*z/(4*n*n)) / denominator if n else np.nan
+                rows.append({'polygon': region, 'lead_days': lead // 24, 'sample': subset['sample'].iloc[0],
+                             'threshold_1e5_s-1': subset['threshold_1e5_s-1'].iloc[0],
+                             'bin_number': index + 1, 'probability_from': index/n_bins,
+                             'probability_through': (index+1)/n_bins, 'case_count': n, 'observed_count': hits,
+                             'mean_forecast_probability': p[mask].mean() if n else np.nan,
+                             'observed_frequency': frequency, 'wilson_lower': max(0., center-half) if n else np.nan,
+                             'wilson_upper': min(1., center+half) if n else np.nan,
+                             'panel_cases': len(subset), 'base_rate': float(y.mean()),
+                             'brier_score': float(subset.brier_score.mean())})
+    return pd.DataFrame(rows, columns=[
+        'polygon', 'lead_days', 'sample', 'threshold_1e5_s-1', 'bin_number',
+        'probability_from', 'probability_through', 'case_count', 'observed_count',
+        'mean_forecast_probability', 'observed_frequency', 'wilson_lower', 'wilson_upper',
+        'panel_cases', 'base_rate', 'brier_score'])
+
+
+def plot_reliability_diagrams(probabilities, *, n_bins=10, title_suffix='All'):
+    """Six reliability panels and inset probability-count histograms."""
+    import matplotlib.pyplot as plt
+
+    if probabilities.empty:
+        raise ValueError('No complete cases for reliability.')
+    counts = reliability_bin_counts(probabilities, n_bins=n_bins)
+    fig, axes = plt.subplots(2, 3, figsize=(15, 9), layout='constrained')
+    for r, region in enumerate(POLYGONS):
+        for c, lead in enumerate(LEAD_HOURS):
+            ax = axes[r, c]
+            bins = counts.loc[counts.polygon.eq(region) & counts.lead_days.eq(lead // 24)]
+            if bins.empty:
+                ax.set_title(f'{region} · {lead // 24}-day · No complete cases')
+                continue
+            filled = bins.loc[bins.case_count.gt(0)]
+            x, y = filled.mean_forecast_probability, filled.observed_frequency
+            ax.plot([0, 1], [0, 1], '--', color='.4', linewidth=1)
+            ax.axhline(bins.base_rate.iloc[0], color='.6', linestyle=':', linewidth=1)
+            ax.errorbar(x, y, yerr=np.maximum(0, np.array([y-filled.wilson_lower, filled.wilson_upper-y])),
+                        marker='o', color='#277486', capsize=3)
+            for px, py, n in zip(x, y, filled.case_count):
+                ax.annotate(f'n={n}', (px, py), xytext=(4, 5), textcoords='offset points', fontsize=7)
+            ax.set(xlim=(-.03, 1.03), ylim=(-.03, 1.03), xlabel='Forecast probability',
+                   ylabel='Observed ERA5 frequency',
+                   title=f'{region} · {lead // 24}-day · N={int(bins.panel_cases.iloc[0])}\n'
+                         f'D < {bins["threshold_1e5_s-1"].iloc[0]:g} × 10⁻⁵ s⁻¹ · BS={bins.brier_score.iloc[0]:.3f}')
+            inset = ax.inset_axes([.58, .10, .35, .22])
+            inset.bar((bins.probability_from+bins.probability_through)/2, bins.case_count,
+                      width=.9/n_bins, color='#92b8c1')
+            inset.set(xlim=(0, 1), title='Forecast counts')
+            inset.tick_params(labelsize=6)
+            inset.title.set_fontsize(7)
+    design = probabilities['sample'].iloc[0]
+    description = ('Event-conditioned convergence reliability (ERA5-selected events)'
+                   if design == 'event_conditioned' else 'Scheduled winter convergence reliability (crossings and non-crossings)')
+    fig.suptitle(f'{description} · {title_suffix}\n'
+                 'Instantaneous 925-hPa polygon mean; 64 members; common all-lead cases\n'
+                 'Dashed: perfect reliability · dotted: sample base rate · bars: pointwise Wilson 95% (dependence ignored)')
+    return fig
+
+
+def export_reliability(tables, destination, thresholds, *, sample='event_conditioned', group='All', n_bins=10):
+    """Refresh probability tables and plots from the current sample, never append old aggregates."""
+    import matplotlib.pyplot as plt
+
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    ranks = verification_subset(tables, group)
+    probabilities = reliability_probabilities(tables['member_values'], ranks, thresholds, sample=sample)
+    bins = reliability_bin_counts(probabilities, n_bins=n_bins)
+    probabilities.to_csv(destination / 'reliability_probabilities.csv', index=False)
+    bins.to_csv(destination / 'reliability_bins.csv', index=False)
+    if not probabilities.empty:
+        summary = probabilities.groupby(['polygon', 'lead_days'], as_index=False).agg(
+            cases=('observed', 'size'), base_rate=('observed', 'mean'), brier_score=('brier_score', 'mean'))
+        summary.to_csv(destination / 'reliability_summary.csv', index=False)
+        fig = plot_reliability_diagrams(probabilities, n_bins=n_bins, title_suffix=group)
+        for extension in ('png', 'pdf'):
+            fig.savefig(destination / f'reliability_diagrams.{extension}', dpi=180)
+        plt.close(fig)
+    else:
+        # Remove plots from a previous successful run if no current cases remain.
+        for name in ('reliability_summary.csv', 'reliability_diagrams.png', 'reliability_diagrams.pdf'):
+            (destination / name).unlink(missing_ok=True)
+    atomic_json_file(destination / 'reliability_settings.json', {
+        'sample': sample, 'group': group, 'thresholds_1e5_s-1': thresholds, 'n_bins': n_bins,
+        'criterion': 'instantaneous polygon divergence strictly less than threshold',
+        'common_sample': 'ERA5 + 64 WN2 members at every lead and both polygons',
+        'not_catalog_D12_event_probability': True,
+    })
+    return probabilities, bins

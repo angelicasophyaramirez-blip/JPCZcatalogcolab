@@ -198,3 +198,21 @@ def test_notebook37_pilot_resume_and_exports(tmp_path, use_dask):
         assert ax.patches[12].get_height() == ax.patches[36].get_height() == 1
     fig.savefig(destination / "rank_histograms_65ranks.png")
     plt.close(fig)
+
+
+def test_embedded_event_reliability_cell_exports_all_groups(tmp_path):
+    from test_reliability import fixtures
+    members, ranks = fixtures()
+    # Add the ranks and times required by the actual histogram cell.
+    ranks['era5_rank'] = np.tile([1, 13, 65], 6)
+    ranks['below_member_min'] = ranks.era5_rank.eq(1)
+    ranks['above_member_max'] = ranks.era5_rank.eq(65)
+    notebook = nbformat.read(ROOT / 'notebooks/37_weathernext2_ensemble_verification.ipynb', as_version=4)
+    namespace = {'__name__': '__main__', 'result_directory': tmp_path, 'plt': plt,
+                 'tables': {'member_values': members, 'case_ranks': ranks}, 'display': lambda value: None}
+    for cell in notebook.cells:
+        if cell.cell_type == 'code' and cell.source.startswith(('# @title 3b', '# @title 3c', '# @title 6 ·')):
+            exec(compile(cell.source, 'notebook37_cell', 'exec'), namespace)
+    assert (tmp_path / 'event_conditioned/all/reliability_diagrams.png').exists()
+    assert (tmp_path / 'event_conditioned/unknown/rank_histograms.pdf').exists()
+    assert pd.read_csv(tmp_path / 'event_conditioned/non_vortex/reliability_probabilities.csv').empty

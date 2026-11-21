@@ -887,10 +887,11 @@ def find_notebook35_references(review_dir, row):
 
 class WeatherNextBrowser:
     """One selected event × one selected member × two fields × three exact leads."""
-    def __init__(self, catalog, archive, output_dir, review_dir):
+    def __init__(self, catalog, archive, output_dir, review_dir, *, catalog_loader=None):
         import ipywidgets as widgets
         from IPython.display import display
         self.catalog = catalog.copy()
+        self.catalog_loader = catalog_loader
         self.archive, self.output_dir, self.review_dir = archive, Path(output_dir), Path(review_dir)
         self.cache_dir = self.output_dir / "regional_cache"
         self.loaded = None
@@ -908,6 +909,8 @@ class WeatherNextBrowser:
         self.export = widgets.Button(description="Export six plots", button_style="success", disabled=True, layout=widgets.Layout(width="200px"))
         self.references = widgets.Button(description="Notebook 35 references", layout=widgets.Layout(width="250px"))
         self.refresh_labels = widgets.Button(description="Refresh vortex labels", layout=widgets.Layout(width="220px"))
+        self.refresh_catalog = widgets.Button(description="Refresh catalog", disabled=catalog_loader is None,
+                                              layout=widgets.Layout(width="180px"))
         self.details = widgets.HTML()
         self.field_help = widgets.HTML()
         self.state = widgets.HTML("Choose an event, then check WN2 access to read the actual member labels.")
@@ -941,11 +944,13 @@ class WeatherNextBrowser:
         self.export.on_click(self._export)
         self.references.on_click(self._references)
         self.refresh_labels.on_click(self._refresh_labels)
+        self.refresh_catalog.on_click(self._refresh_catalog)
         self.view = widgets.VBox([
             widgets.HTML("<h3>WeatherNext 2 · JPCZ event browser</h3><p>One member · two variables · leads 1, 5, 10 days. "
                          "Controls do not download forecast fields until <b>Load six plots</b>. "
                          "Scale bounds stay fixed across leads/events until you change them.</p>"),
-            self.search, self.event, widgets.HBox([self.previous, self.next, self.references, self.refresh_labels]), self.details,
+            widgets.HBox([self.refresh_catalog, self.refresh_labels]), self.search, self.event,
+            widgets.HBox([self.previous, self.next, self.references]), self.details,
             widgets.HBox([self.inspect, self.member, self.defaults]), *rows, self.field_help,
             widgets.HBox([self.load, self.export]), self.state, self.log_output, self.plot_output, self.reference_output,
         ])
@@ -1008,6 +1013,24 @@ class WeatherNextBrowser:
         self._filter()
         self.export.disabled = True
         self.state.value = "<b>Notebook 35 vortex labels refreshed.</b> Load six plots to apply the labels; matching forecast data are reused from cache."
+
+    def _refresh_catalog(self, _=None):
+        if self.catalog_loader is None:
+            return
+        try:
+            fresh = self.catalog_loader()
+            if fresh.empty:
+                raise ValueError('No events in the configured study window.')
+            self.archive.clear()
+            self.catalog = fresh.copy()
+            self.loaded, self.schema = None, None
+            self.member.options = []
+            self.member.disabled = True
+            self.plot_output.clear_output()
+            self._filter()
+            self.state.value = f'<b>Catalog refreshed: {len(fresh)} events.</b> Check data &amp; members for a new event.'
+        except Exception as error:
+            self.state.value = '<b>Catalog refresh failed:</b> ' + html.escape(str(error))
 
     def _changed(self, change=None):
         if self._updating:

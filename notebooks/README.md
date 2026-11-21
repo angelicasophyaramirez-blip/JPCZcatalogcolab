@@ -78,3 +78,14 @@ Design rule:
 - Notebook 33 creates seasonal-background (not event-composite) figures: a broad NDJF MSLP/925-hPa wind map with objectively located Siberian High and Aleutian Low centers, and a wider regional terrain/SST/2-m-temperature/925-hPa-wind map. It saves one Drive checkpoint for each NDJF calendar month so interrupted runs resume safely.
 - Notebook 34 preserves the 2000–2025 catalog, reuses its compatible monthly `D12` files read-only, calculates only missing monthly ERA5 divergence checkpoints for complete NDJF seasons 1940/41–2025/26, recomputes the full-record month-specific thresholds, and writes a temporal-overlap comparison of the two final merged catalogs.
 - Notebook 36 is standalone in Colab: it embeds the reusable `weathernext_atlas.py` helpers, authenticates the approved Google account, reads the same current Drive catalog as Notebook 35, discovers exact WN2 forecast stores, and renders six panels for one selected member. It retains the nearest six-hour target on the original UTC start date (ties earlier), checks exact member/lead/level/units, and saves regional caches and exports in `JPCZcatalog_outputs/weathernext2_atlas`. Its 2023-onward study window is provisional until the operational model's training cutoff is verified. See [the Notebook 36 run guide](../docs/weathernext2-atlas.md).
+
+37. `37_weathernext2_ensemble_verification.ipynb` — all 64 members against ERA5;
+    common-case 65-rank/five-group histograms, event-conditioned reliability,
+    optional regular winter reliability including non-events, and vortex strata.
+38. `38_update_winter_catalog.ipynb` — standalone rolling extension of the
+    established Notebook 04 detector and Notebook 06 merge, frozen monthly
+    thresholds, actual Drive inventory inspection, pending-data reporting, and
+    a date search for new events. Writes the shared catalog used by 35–37.
+
+For the correct detector version, first-run inspection, November 19 example,
+and the refresh sequence, see [winter catalog updates](../docs/winter-catalog-updates.md).

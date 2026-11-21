@@ -566,3 +566,27 @@ def test_generated_notebook_valid_and_embedded_source_current():
     assert any(source.endswith(core.strip() + "\n") for source in code)
     assert any(source.endswith(ui.strip() + "\n") for source in code)
     assert not any(cell.get("outputs") for cell in nb.cells)
+
+
+def test_refresh_catalog_adds_events_and_unlocks_new_access_check(row, tmp_path):
+    later = row.copy()
+    for column in wn.DATE_COLUMNS:
+        later[column] += pd.Timedelta(days=30)
+    later.event_number = 999
+    fresh = wn.normalise_catalog(pd.DataFrame([row, later]))
+    archive = FakeArchive()
+    cleared = []
+    archive.clear = lambda: cleared.append(True)
+    browser = wn.WeatherNextBrowser(pd.DataFrame([row]), archive, tmp_path / 'out', tmp_path / 'refs',
+                                    catalog_loader=lambda: fresh)
+    browser._inspect()
+    browser.loaded = {'old': 'selection'}
+    browser._refresh_catalog()
+    assert len(browser.catalog) == 2
+    assert cleared == [True]
+    assert browser.loaded is None and browser.schema is None
+    assert browser.member.disabled and browser.load.disabled and browser.export.disabled
+    assert '2 events' in browser.state.value
+    browser.search.value = '999'
+    assert browser.selected_row().event_number == 999
+    assert not browser.inspect.disabled

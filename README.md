@@ -49,3 +49,7 @@ The repository now includes the core module structure needed to reproduce the fi
 2. reduce rerun fragility by persisting intermediate benchmark products when helpful
 3. test finer vorticity-box geometry changes
 4. decide whether the catalog target is strict Shinoda reproduction or an ERA5-adapted operational catalog
+
+For new winter events, start with [Notebook 38](notebooks/38_update_winter_catalog.ipynb),
+then refresh Notebooks 35–36 and rerun Notebook 37's rank and reliability stages.
+See [the detector version and seasonal update guide](docs/winter-catalog-updates.md).

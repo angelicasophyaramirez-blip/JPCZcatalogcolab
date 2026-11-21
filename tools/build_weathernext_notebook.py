@@ -47,6 +47,12 @@ cells = [
     The notebook counts the current catalog rather than assuming 34 events. It does not
     silently substitute an older historical catalog, another WN model, or ensemble means.
 
+    **Add new winter events:** run [Notebook 38 · update and search the catalog](https://colab.research.google.com/github/angelicasophyaramirez-blip/JPCZcatalogcolab/blob/codex/notebook36-weathernext2/notebooks/38_update_winter_catalog.ipynb),
+    then click **Refresh catalog** in this browser. It reloads the shared CSV and clears
+    stale archive listings while preserving cached fields. An unavailable WN2 run remains
+    missing until that exact initialization is published. New review windows need a new
+    Notebook 35 vortex screen; Notebook 37 retains unchecked cases as Unknown in its strata.
+
     Sources: [WeatherNext 2 model/data guide](https://developers.google.com/weathernext/guides/models-wn2),
     [official WN2 Zarr example](https://storage.googleapis.com/weathernext-public/colabs/WeatherNext_2_Starter_Guide_Zarr_on_Google_Cloud_Storage.ipynb),
     [dataset and attribution](https://developers.google.com/earth-engine/datasets/catalog/projects_gcp-public-data-weathernext_assets_weathernext_2_0_0),
@@ -140,11 +146,16 @@ cells = [
     Signed peak D12 is a **12-hour divergence** measure, not precipitation intensity.
     """),
     cell("code", """
-    catalog, selection_report = read_catalog(
-        CATALOG_PATH, NOTEBOOK35_DIR, STUDY_START_UTC, STUDY_END_UTC or None)
+    def reload_current_catalog():
+        fresh, report = read_catalog(
+            CATALOG_PATH, NOTEBOOK35_DIR, STUDY_START_UTC, STUDY_END_UTC or None)
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        report.to_csv(OUTPUT_DIR / 'event_selection_report.csv', index=False)
+        fresh.to_csv(OUTPUT_DIR / 'selected_event_inventory.csv', index=False)
+        return fresh
+
+    catalog = reload_current_catalog()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    selection_report.to_csv(OUTPUT_DIR / 'event_selection_report.csv', index=False)
-    catalog.to_csv(OUTPUT_DIR / 'selected_event_inventory.csv', index=False)
     if catalog.empty:
         raise ValueError('No events in the configured study window. Check paths and dates above.')
     print(f'{len(catalog)} selected events from {catalog.event_start.min()} to {catalog.event_start.max()} UTC')
@@ -212,7 +223,8 @@ cells = [
     cell("code", '# @title Load event-browser helpers (run unchanged)\n' + ui),
     cell("code", """
     archive = GoogleCloudArchive(credentials, PROJECT_ID or detected_project or '', overrides=RUN_OVERRIDES)
-    browser = WeatherNextBrowser(catalog, archive, OUTPUT_DIR, NOTEBOOK35_DIR)
+    browser = WeatherNextBrowser(catalog, archive, OUTPUT_DIR, NOTEBOOK35_DIR,
+                                 catalog_loader=reload_current_catalog)
     browser.display()
     """),
     cell("markdown", """

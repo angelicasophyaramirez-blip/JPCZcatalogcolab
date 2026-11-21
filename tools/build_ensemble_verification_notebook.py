@@ -48,6 +48,11 @@ cells = [
     onset timing rule. You can run this notebook directly using that CSV and your approved
     WeatherNext account. The plotting batches in Notebooks 35 and 36 are optional.
 
+    **New winter events:** start with [Notebook 38 · update and search the catalog](https://colab.research.google.com/github/angelicasophyaramirez-blip/JPCZcatalogcolab/blob/codex/notebook36-weathernext2/notebooks/38_update_winter_catalog.ipynb).
+    It extends the established Notebook 04/06 detector using frozen thresholds, then writes
+    the same Drive CSV used here. Reload the catalog and rerun this notebook to update
+    the ranks and reliability plots. Counts always come from that file; no 275-event limit.
+
     [WeatherNext 2 data and attribution](https://developers.google.com/earth-engine/datasets/catalog/projects_gcp-public-data-weathernext_assets_weathernext_2_0_0)
     · [Rank histogram method, Gneiting et al. (2007)](https://sites.stat.washington.edu/raftery/Research/PDF/Gneiting2007jrssb.pdf)
     · [Interpretation and case selection, Hamill (2001)](https://doi.org/10.1175/1520-0493%282001%29129%3C0550%3AIORHFV%3E2.0.CO%3B2)
@@ -98,6 +103,7 @@ cells = [
     OUTPUT_DIR = DRIVE_ROOT / 'weathernext2_ensemble_verification'
     STUDY_START_UTC = '2023-01-01'  # @param {type:"date"}
     STUDY_END_UTC = ''  # @param {type:"string"} # Optional exclusive UTC date.
+    ALLOW_ERA5T = True  # Use and label preliminary references; refresh them on every rerun.
     RUN_OVERRIDES = {}
     """),
     cell("code", "# @title 3b · Load WeatherNext archive helpers (in this notebook)\n" + atlas
@@ -179,7 +185,11 @@ cells = [
             'wait for each to finish, then rerun section 4.\\n' + '\\n'.join(missing_setup)
             + '\\nIf the runtime restarted, first rerun sections 1, 2, and 3a. '
             'Completed Drive checkpoints will be reused.')
-    tables, calculation_settings = run_ensemble_verification(selected, archive, OUTPUT_DIR)
+    # Clear stale archive metadata/listings when retrying a newly published date.
+    open_verification_era5.cache_clear()
+    archive.clear()
+    tables, calculation_settings = run_ensemble_verification(
+        selected, archive, OUTPUT_DIR, allow_era5t=ALLOW_ERA5T)
     display(tables['batch_status'][['event_number', 'lead_days', 'era5_status', 'wn2_status',
                                     'era5_error', 'wn2_error']])
     ranks = tables['case_ranks']
@@ -225,6 +235,7 @@ cells = [
         **calculation_settings, 'catalog': str(CATALOG_PATH), 'study_start_utc': STUDY_START_UTC,
         'study_end_utc_exclusive': STUDY_END_UTC or None, 'run_mode': RUN_MODE,
         'selected_events': len(selected), 'lead_hours': list(LEAD_HOURS), 'tie_seed': 37,
+        'allow_era5t': ALLOW_ERA5T,
         'training_cutoff_status': 'operational archive training cutoff unverified',
         'wn2_data_reference': (
             'Google LLC WeatherNext 2 historic experimental data (CC BY 4.0). '
@@ -244,20 +255,124 @@ cells = [
                 display(figure)
             plt.close(figure)
     else:
+        for stem in ('rank_histograms_65ranks', 'rank_histograms'):
+            for extension in ('png', 'pdf'):
+                (result_directory / f'{stem}.{extension}').unlink(missing_ok=True)
         print('No complete event for all three leads. Check Batch status, then retry section 4.')
     """),
     cell("markdown", """
-    ## Follow-up · Reliability diagrams
+    ## 6 · Reliability diagrams and vortex strata
 
-    Reliability will compare a forecast probability of crossing a specified convergence
-    threshold with a binary ERA5 outcome. Use independently scheduled winter times that
-    include crossings and non-crossings. The ERA5 catalog detector uses a 12-hour average
-    of hourly values. Before applying its criterion to WN2, check how well a six-hourly
-    approximation reproduces the hourly ERA5 decisions. The rank workflow above uses a
-    matched snapshot and has no convergence threshold.
+    For each polygon and lead, forecast probability is the fraction of the **64 members**
+    whose instantaneous 925-hPa polygon-mean divergence is **strictly below** the configured
+    threshold. ERA5 supplies a binary crossing/non-crossing at the same valid time.
+    The threshold below is an **editable exploratory snapshot criterion**, in 10⁻⁵ s⁻¹.
+    Choose it before evaluating the forecast sample. It is **not** the catalog's hourly
+    trailing-D12 threshold, and these probabilities are not probabilities of the complete
+    JPCZ detector event or vortex occurrence. Testing a six-hourly approximation to D12
+    remains a separate scientific step.
 
-    Forecast data: Google WeatherNext 2 historical experimental data, CC BY 4.0.
-    Reference: ERA5 reanalysis via Google Research ARCO-ERA5.
+    These first diagrams use the **ERA5-event-conditioned sample**, the same complete
+    all-lead cases as the rank histograms. They describe convergence calibration among
+    selected events, not winter-wide occurrence calibration. Section 7 supplies the
+    independent winter schedule including non-events for broader assessment.
+
+    Fixed probability bins include 0 and 1; empty bins remain in the saved tables but
+    are not plotted as zero occurrence. Each diagram includes sample counts, base rate,
+    Brier score, and forecast-count inset. Pointwise Wilson intervals are descriptive;
+    serially related winter times are not independent uncertainty estimates.
+
+    Separate All / Vortex / Non-vortex / Unknown outputs use Notebook 35's completed
+    screen status. Unchecked or failed screens never enter the Non-vortex stratum.
+    Changed review labels update the strata without redownloading the forecasts.
+    """),
+    cell("code", """
+    # @title 6 · Refresh event-conditioned reliability and group rank plots
+    SNAPSHOT_THRESHOLD_1E5 = -2.0  # @param {type:"number"} # Exploratory; choose before analysis.
+    RELIABILITY_THRESHOLDS = {region: SNAPSHOT_THRESHOLD_1E5 for region in POLYGONS}
+    PROBABILITY_BINS = 10
+    for group in ('All', 'Vortex', 'Non-vortex', 'Unknown'):
+        folder = result_directory / 'event_conditioned' / group.lower().replace('-', '_')
+        probabilities, bins = export_reliability(
+            tables, folder, RELIABILITY_THRESHOLDS, group=group, n_bins=PROBABILITY_BINS)
+        group_ranks = verification_subset(tables, group)
+        n = 0 if group_ranks.empty else group_ranks.loc[group_ranks.in_common_sample, 'review_key'].nunique()
+        print(f'{group}: {n} complete events; results in {folder}')
+        for grouped, stem in ((False, 'rank_histograms_65ranks'), (True, 'rank_histograms')):
+            if n:
+                rank_histogram_counts(group_ranks, grouped=grouped).to_csv(folder / f'{stem}_counts.csv', index=False)
+                figure = plot_rank_histograms(group_ranks, grouped=grouped, title_suffix=group)
+                for extension in ('png', 'pdf'):
+                    figure.savefig(folder / f'{stem}.{extension}', dpi=180)
+                plt.close(figure)
+            else:
+                for extension in ('png', 'pdf', '_counts.csv'):
+                    stale = folder / (f'{stem}{extension}' if extension.startswith('_') else f'{stem}.{extension}')
+                    stale.unlink(missing_ok=True)
+        if group == 'All' and not probabilities.empty:
+            figure = plot_reliability_diagrams(probabilities, n_bins=PROBABILITY_BINS)
+            display(figure)
+            plt.close(figure)
+    """),
+    cell("markdown", """
+    ## 7 · Scheduled winter reliability, including non-events
+
+    This optional retrieval uses a regular UTC schedule fixed independently of observed
+    events. Both threshold crossings and non-crossings are retained; missing reference or
+    forecast inputs are marked failed/pending rather than coded as zero. Set the **exclusive**
+    end to extend the winter sample. By default there is one target per day at 00 UTC in
+    November–February; choose 6 or 12 hours for a denser schedule. Do not select only dates
+    with catalog events or select dates according to forecast probabilities.
+
+    This can require substantial WN2 reads: every target uses all members at three leads.
+    The preview is free of field downloads; set RUN_SCHEDULED_RELIABILITY to True to retrieve.
+    It shares compact wind-derived checkpoints with the catalog run, but saves its own
+    probabilities, counts, settings, and status table. Its sample contains no event-derived
+    vortex strata. Training overlap and missing-case selection still limit interpretation.
+
+    To extend, rerun this cell with the same start and later end. Failed dates retry;
+    completed WN2 targets/leads reuse their checkpoints. ERA5T targets refresh until final.
+    A November 19 target requests initializations on November 18, 14, and 9 at the same UTC
+    hour for the 1-, 5-, and 10-day leads. Exact WN2 availability is checked on each request;
+    the workflow never substitutes a later run or another model.
+    """),
+    cell("code", """
+    # @title 7 · Preview or run the outcome-independent winter schedule
+    RUN_SCHEDULED_RELIABILITY = False  # @param {type:"boolean"}
+    SCHEDULE_START_UTC = '2026-11-01'  # @param {type:"date"}
+    SCHEDULE_END_UTC = '2027-03-01'  # @param {type:"date"} # Exclusive; future times stay pending.
+    SCHEDULE_INTERVAL_HOURS = 24  # @param [6, 12, 24] {type:"raw"}
+    scheduled = scheduled_verification_catalog(
+        SCHEDULE_START_UTC, SCHEDULE_END_UTC, interval_hours=SCHEDULE_INTERVAL_HOURS)
+    print(f'{len(scheduled)} winter targets; {len(scheduled)*len(LEAD_HOURS)} forecast requests.')
+    display(scheduled[['event_number', 'target_valid_time']])
+    if RUN_SCHEDULED_RELIABILITY:
+        # Future schedule entries remain visible in the preview, but are not downloaded.
+        due = scheduled.loc[scheduled.target_valid_time.le(pd.Timestamp.now(tz='UTC').tz_localize(None))]
+        if due.empty:
+            raise ValueError('No schedule targets are due yet.')
+        open_verification_era5.cache_clear()
+        archive.clear()
+        scheduled_tables, scheduled_settings = run_ensemble_verification(
+            due, archive, OUTPUT_DIR, allow_era5t=ALLOW_ERA5T)
+        schedule_dir = OUTPUT_DIR / 'scheduled_winter'
+        schedule_dir.mkdir(parents=True, exist_ok=True)
+        for name, frame in scheduled_tables.items():
+            frame.to_csv(schedule_dir / f'{name}.csv', index=False)
+        schedule_settings = {**scheduled_settings, 'start': SCHEDULE_START_UTC,
+            'end_exclusive': SCHEDULE_END_UTC, 'interval_hours': SCHEDULE_INTERVAL_HOURS,
+            'due_targets': len(due), 'future_targets': len(scheduled)-len(due), 'allow_era5t': ALLOW_ERA5T}
+        atomic_json_file(schedule_dir / 'schedule_settings.json', schedule_settings)
+        scheduled_probabilities, scheduled_bins = export_reliability(
+            scheduled_tables, schedule_dir, RELIABILITY_THRESHOLDS,
+            sample='scheduled_winter', n_bins=PROBABILITY_BINS)
+        display(scheduled_tables['batch_status'])
+        verified = scheduled_probabilities.review_key.nunique() if not scheduled_probabilities.empty else 0
+        print(f'{verified}/{len(due)} due targets verified at all leads; {len(scheduled)-len(due)} future targets.')
+        if not scheduled_probabilities.empty:
+            figure = plot_reliability_diagrams(scheduled_probabilities, n_bins=PROBABILITY_BINS)
+            display(figure)
+            plt.close(figure)
     """),
 ]
 
