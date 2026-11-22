@@ -12,8 +12,9 @@ new phase. Missing login stops with instructions rather than producing hundreds
 of incomplete precipitation panels. Individual map requests also check login
 when uncached IMERG intervals need downloading. Login failures propagate through
 the case reader and stop the batch; completed phase files remain untouched.
-Sign in and rerun with the same settings to reuse complete phases and retry
-partial phases from an earlier unauthenticated run. Credentials are not saved.
+Sign in and rerun with the same settings to reuse saved phases and resume
+unfinished phases. To replace saved partial exports from an earlier unauthenticated
+run, explicitly set `BATCH_RETRY_INCOMPLETE = True`. Credentials are not saved.
 
 In the final batch cell, set:
 
@@ -22,13 +23,16 @@ RUN_BATCH = True
 EVENTS_PER_RUN = None
 BATCH_WINDOW_HOURS = 1
 BATCH_SATELLITE_PLATFORM = 'Auto'
+BATCH_RETRY_INCOMPLETE = False
 ```
 
 This loads the current shared Drive catalog again and processes every remaining
 event at exactly peak −12 h, peak, and peak +12 h. `EVENTS_PER_RUN = 1` is an
 optional pilot that processes all three phases for one event. A limit counts
-attempted events, not individual plots. Partial or failed events are retried on
-later runs; use `None` to visit all events despite gaps in earlier cases.
+attempted events, not individual plots. By default, resume reuses saved partial
+and failed exports as well as complete ones; their gap statuses remain visible.
+Set `BATCH_RETRY_INCOMPLETE = True` only for a separate pass to retry saved gaps.
+Use `None` to visit all events despite gaps in earlier cases.
 
 `BATCH_WINDOW_HOURS = 12` instead applies the trailing 12-hour divergence and
 precipitation-rate window at each of those three target times. Circulation is
@@ -79,6 +83,15 @@ settings invalidate the relevant completion checks. Existing map/data caches
 are reused by the notebook readers. No catalog CSV or saved review is changed
 by the batch exporter itself; the catalog refresh can update the review inventory.
 
+The catalog attacher now retains the cached vortex-screen signature. The exporter
+also recovers an omitted/blank duplicate signature from the same full saved reader
+configuration. This repairs the legacy first-phase resume mismatch without changing
+the output directory or accepting a changed screen, label, event window, or reader
+setting. A restart therefore does not redraw each event's −12-hour phase simply
+because its catalog row omitted that redundant signature. Resume logs the number
+of reused phases, and rewrites the master CSVs after new work rather than for
+every reused record.
+
 Only one six-panel figure is rendered at a time and it is closed immediately.
 Batch figures are saved rather than accumulating hundreds of large inline
 outputs. The three-page PDF is assembled one event at a time. There is no single
@@ -127,7 +140,7 @@ vortex-hour caches remain on Drive and are reused.
 
 If weather data cannot be loaded, the affected phase receives a labeled error
 page and a failed metadata record; later events continue. Transient precipitation
-or imagery gaps are partial and retried on the next pass. Satellite dates before
+or imagery gaps are partial and retry only with `BATCH_RETRY_INCOMPLETE = True`. Satellite dates before
 archive availability are marked `complete_archive_gap` when the other inputs
 are complete, so an impossible old image does not cause endless retries.
 Missing data are never converted to zero.

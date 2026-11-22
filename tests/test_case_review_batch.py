@@ -130,7 +130,9 @@ def test_failed_phase_gets_labeled_page_later_cases_continue_and_retry_is_local(
     assert 'Case data unavailable' in PdfReader(first.pdf.iloc[1]).pages[0].extract_text()
     api['load_case'] = real_load
     reads.clear()
-    second = run_case_review_batch(cases(), tmp_path, progress=lambda _: None, **api)
+    skipped = run_case_review_batch(cases(), tmp_path, progress=lambda _: None, **api)
+    assert not reads and skipped.status.eq('failed').sum() == 1
+    second = run_case_review_batch(cases(), tmp_path, retry_incomplete=True, progress=lambda _: None, **api)
     assert len(reads) == 1 and reads[0][0] == 1 and reads[0][1]['offset'] == 0
     assert second.status.eq('complete').all()
 
@@ -169,6 +171,7 @@ def test_notebook_batch_defaults_all_events_and_suppresses_inline_plot_flood():
     assert namespace['EVENTS_PER_RUN'] is None
     assert namespace['BATCH_SATELLITE_PLATFORM'] == 'Auto'
     assert not namespace['RUN_BATCH']
+    assert namespace['BATCH_RETRY_INCOMPLETE'] is False
 
 
 def test_actual_notebook_maps_export_all_three_times_without_inline_displays(tmp_path, monkeypatch):
@@ -236,7 +239,9 @@ def test_partial_inputs_are_retried_and_do_not_stop_other_events(tmp_path):
     assert len(reads) == 6
     api['load_case'] = real_load
     reads.clear()
-    second = run_case_review_batch(cases(), tmp_path, progress=lambda _: None, **api)
+    skipped = run_case_review_batch(cases(), tmp_path, progress=lambda _: None, **api)
+    assert not reads and skipped.status.eq('partial_data').sum() == 3
+    second = run_case_review_batch(cases(), tmp_path, retry_incomplete=True, progress=lambda _: None, **api)
     assert len(reads) == 3 and all(number == 1 for number, _ in reads)
     assert second.status.eq('complete').all()
 
@@ -320,3 +325,44 @@ def test_actual_case_reader_propagates_login_and_memory_failures(failed_request,
     exec(compile(ast.Module(body=[node], type_ignores=[]), 'notebook35_get_case', 'exec'), namespace)
     with pytest.raises(error_type):
         namespace['get_case'](row)
+
+
+def test_reload_without_redundant_screen_signature_reuses_all_saved_phases(tmp_path):
+    api, reads, _, _ = batch_api()
+    # Real Notebook 35 catalog rows omitted this field; case metadata supplied it after load.
+    fresh = cases().drop(columns='vortex_screen_signature')
+    settings = {'vortex_signature':'screen-v1'}
+    first = run_case_review_batch(fresh, tmp_path, limit=1, settings=settings, progress=lambda _:None, **api)
+    root = Path(first.attrs['output_dir'])
+    png = Path(first.png.iloc[0]); before = png.stat().st_mtime_ns
+    # Also accept an old blank duplicate when the full saved config fixes the actual screen.
+    state = next(root.glob('event_0001*/peak.json'))
+    saved = json.loads(state.read_text()); saved['request']['vortex_screen_signature'] = ''
+    state.write_text(json.dumps(saved))
+    reads.clear()
+    resumed = run_case_review_batch(fresh.copy(), tmp_path, settings=settings, progress=lambda _:None, **api)
+    assert [event for event, _ in reads] == [2,2,2]
+    assert resumed.status.eq('complete').all()
+    assert png.stat().st_mtime_ns == before
+    assert json.loads((root/'batch_summary.json').read_text())['reused_phases'] == 3
+
+
+def test_changed_real_screen_or_event_identity_still_invalidates_saved_outputs(tmp_path):
+    from jpcz_catalog.case_review_batch import batch_request_matches
+    saved = {'config':{'reader_settings':{'vortex_signature':'screen-v1'}},
+             'vortex_screen_signature':'screen-v1', 'label':'Vortex-associated'}
+    current = dict(saved, vortex_screen_signature='screen-v2')
+    assert not batch_request_matches(saved, current)
+    assert not batch_request_matches(saved, dict(saved, label='Non-vortex-associated'))
+
+
+def test_actual_catalog_attacher_preserves_saved_screen_signature(tmp_path):
+    notebook = json.loads((ROOT/'notebooks/35_imerg_manual_case_review.ipynb').read_text())
+    source = next(''.join(c['source']) for c in notebook['cells'] if 'def get_case(' in ''.join(c['source']))
+    node = next(n for n in ast.parse(source).body if isinstance(n,ast.FunctionDef) and n.name=='attach_vortex_flags')
+    ns = dict(OUTPUT_DIR=tmp_path, VORTEX_LABEL_SCHEME='test', vortex_signature=lambda:'screen-v1',
+        vortex_cache_dir=lambda:tmp_path, atomic_json=lambda *args:None,
+        cached_event_vortex=lambda row:{'signature':'screen-v1','vortex_detected':True})
+    exec(compile(ast.Module(body=[node],type_ignores=[]),'notebook35_attach','exec'),ns)
+    result = ns['attach_vortex_flags'](cases().drop(columns='vortex_screen_signature'))
+    assert result.vortex_screen_signature.eq('screen-v1').all()

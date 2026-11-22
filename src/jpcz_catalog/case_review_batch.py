@@ -23,7 +23,8 @@ def require_earthdata_auth(auth):
             'NASA Earthdata login is missing in this runtime. Run the cell under '
             '"NASA authentication for new IMERG map requests" and wait for '
             '"NASA Earthdata authenticated", then rerun the batch with the same settings. '
-            'Completed exports and cached data will be reused; partial phases will retry.')
+            'Saved exports and cached data will be reused; unfinished phases will resume. '
+            'Use BATCH_RETRY_INCOMPLETE = True only to retry saved data gaps.')
 
 
 def batch_json_value(value):
@@ -57,6 +58,26 @@ def batch_atomic_csv(frame, path):
 def batch_digest(value):
     encoded = json.dumps(batch_json_value(value), sort_keys=True, allow_nan=False).encode()
     return hashlib.sha256(encoded).hexdigest()[:16]
+
+
+def batch_screen_signature(row, settings):
+    """Reloaded catalog rows may omit a signature already fixed by reader settings."""
+    value = row.get('vortex_screen_signature', '')
+    if isinstance(value, str) and value:
+        return value
+    value = (settings or {}).get('vortex_signature', '')
+    return value if isinstance(value, str) else ''
+
+
+def batch_request_matches(saved, current):
+    # Older rows sometimes omitted this duplicate of config.reader_settings.vortex_signature.
+    # Preserve every other comparison, including the complete reader/settings identity.
+    def canonical(request):
+        result = dict(request)
+        settings = result.get('config', {}).get('reader_settings', {})
+        result['vortex_screen_signature'] = batch_screen_signature(result, settings)
+        return result
+    return canonical(saved) == canonical(current)
 
 
 def batch_data_status(metadata):
@@ -143,8 +164,9 @@ def run_case_review_batch(frame, output_dir, *, load_case, render_cases, label_f
                           refresh_event=None, release_memory=None, check_auth=None, export_phase=None,
                           hours=1, limit=None, offsets=(-12, 0, 12),
                           satellite_platform='Auto', satellite_day_offset=0,
-                          accumulation_mode='event_start', settings=None, dpi=180, progress=print):
-    """Export every selected event at all phases; retry only incomplete or changed products.
+                          accumulation_mode='event_start', settings=None, dpi=180,
+                          retry_incomplete=False, progress=print):
+    """Resume missing/changed exports; retry saved partial products only when requested.
 
     Per event: three PNG/PDF/metadata sets plus a three-page PDF and combined CSV.
     The root manifest/CSV always describes the supplied current inventory, not old folders.
@@ -180,7 +202,7 @@ def run_case_review_batch(frame, output_dir, *, load_case, render_cases, label_f
                            requested_phases=len(frame)*3), root / 'batch_summary.json')
     progress(f'Batch folder: {root}')
     progress(f'{len(frame)} events; three times per event; satellite mode {satellite_platform}.')
-    jobs, attempted_events = [], 0
+    jobs, attempted_events, reused_phases = [], 0, 0
 
     for _, original in frame.iterrows():
         row = refresh_event(original.copy()) if refresh_event else original.copy()
@@ -200,18 +222,24 @@ def run_case_review_batch(frame, output_dir, *, load_case, render_cases, label_f
                     event_number=int(row.event_number), offset_hours=offset,
                     event_start=row.event_start, event_end=row.event_end, event_peak=row.event_peak,
                     label=label_for(row), vortex_scan_status=row.get('vortex_scan_status', ''),
-                    vortex_screen_signature=row.get('vortex_screen_signature', '')))
+                    vortex_screen_signature=batch_screen_signature(row, settings)))
             identity = request_identity()
             saved = None
             if state_path.exists() and all(path.is_file() and path.stat().st_size for path in files.values()):
                 try:
                     candidate = json.loads(state_path.read_text())
-                    if candidate['request'] == identity:
+                    if batch_request_matches(candidate['request'], identity):
                         saved = candidate
                 except (KeyError, ValueError, OSError):
                     pass
-            if saved and saved['record']['status'] in ('complete', 'complete_archive_gap'):
+            wrote_phase = False
+            if saved and (saved['record']['status'] in ('complete', 'complete_archive_gap')
+                          or (not retry_incomplete and saved['record']['status'] in ('partial_data', 'failed'))):
                 record = saved['record']
+                reused_phases += 1
+                if reused_phases % 75 == 0:
+                    progress(f'Reused {reused_phases} saved phases; no maps redrawn. '
+                             f'Checking event {int(row.event_number)} of {len(frame)}.')
             elif limit is not None and not touched_event and attempted_events >= limit:
                 # Inventory still includes saved partial products and work left for later runs.
                 record = saved['record'] if saved else dict(review_key=str(row.review_key),
@@ -260,12 +288,14 @@ def run_case_review_batch(frame, output_dir, *, load_case, render_cases, label_f
                 record = batch_json_value(dict(**metadata, status=status,
                     **{name: str(path) for name, path in files.items()}))
                 batch_atomic_json(dict(request=identity, record=record), state_path)
+                wrote_phase = True
                 (release_memory or gc.collect)()
             event_jobs.append(record)
             jobs.append(record)
             # Update after each phase, including a partial/failed phase, so a disconnect loses little.
-            batch_atomic_csv(pd.DataFrame(jobs), root / 'batch_manifest.csv')
-            batch_atomic_csv(pd.DataFrame(jobs), root / 'all_cases_metadata.csv')
+            if wrote_phase:
+                batch_atomic_csv(pd.DataFrame(jobs), root / 'batch_manifest.csv')
+                batch_atomic_csv(pd.DataFrame(jobs), root / 'all_cases_metadata.csv')
         # Each phase has its own outputs. This PDF groups all three times for one event.
         if all(Path(job.get('pdf', '')).is_file() and job['status'] != 'not_attempted' for job in event_jobs):
             event_pdf = event_dir / 'all_three_times.pdf'
@@ -282,7 +312,8 @@ def run_case_review_batch(frame, output_dir, *, load_case, render_cases, label_f
     batch_atomic_csv(result, root / 'all_cases_metadata.csv')
     counts = result.status.value_counts().to_dict() if not result.empty else {}
     batch_atomic_json(dict(run_status='finished', selected_events=len(frame), attempted_events=attempted_events,
-                           requested_phases=len(frame)*3, statuses=counts), root / 'batch_summary.json')
+                           requested_phases=len(frame)*3, reused_phases=reused_phases,
+                           retry_incomplete=retry_incomplete, statuses=counts), root / 'batch_summary.json')
     progress(f'Attempted {attempted_events} events this run. Phase status: {counts}.')
     progress(f'All PDF/PNG/CSV exports are together in {root}')
     result.attrs['output_dir'] = str(root)

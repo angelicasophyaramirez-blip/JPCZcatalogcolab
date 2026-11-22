@@ -13,7 +13,7 @@ notebook = json.loads(TARGET.read_text())
 module = (ROOT / 'src/jpcz_catalog/case_review_batch.py').read_text()
 marker = '# --- Resumable three-time batch exports ---'
 wrapper = '''def run_batch(frame, hours=1, limit=None, offsets=(-12, 0, 12), satellite_platform='Auto',
-              satellite_day_offset=0, accumulation_mode='event_start'):
+              satellite_day_offset=0, accumulation_mode='event_start', retry_incomplete=False):
     return run_case_review_batch(
         frame, OUTPUT_DIR, load_case=get_case,
         check_auth=lambda: require_earthdata_auth(globals().get('auth')),
@@ -21,6 +21,7 @@ wrapper = '''def run_batch(frame, hours=1, limit=None, offsets=(-12, 0, 12), sat
         render_cases=lambda cases: plot_cases(cases, show=False), label_for=vortex_plot_label,
         refresh_event=lambda row: attach_vortex_flags(pd.DataFrame([row])).iloc[0],
         hours=hours, limit=limit, offsets=offsets, satellite_platform=satellite_platform,
+        retry_incomplete=retry_incomplete,
         satellite_day_offset=satellite_day_offset, accumulation_mode=accumulation_mode,
         settings=dict(domain=DOMAIN, polygons=POLYGONS, era5_store=ERA5_STORE,
                       imerg_product=IMERG_PRODUCT, imerg_version=IMERG_VERSION,
@@ -34,6 +35,13 @@ for item in notebook['cells']:
         node = next(node for node in ast.parse(source).body
                     if isinstance(node, ast.FunctionDef) and node.name == 'run_batch')
         source = source.replace(ast.get_source_segment(source, node), wrapper, 1)
+        attacher = next(node for node in ast.parse(source).body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'attach_vortex_flags')
+        old_attacher = ast.get_source_segment(source, attacher)
+        if "frame['vortex_screen_signature']" not in old_attacher:
+            new_attacher = old_attacher.replace('    return frame',
+                "    frame['vortex_screen_signature'] = [r.get('signature', vortex_signature()) if r else '' for r in records]\n    return frame")
+            source = source.replace(old_attacher, new_attacher, 1)
         # Protect individual browser requests too, but allow fully cached IMERG reads offline.
         loader = next(node for node in ast.parse(source).body
                       if isinstance(node, ast.FunctionDef) and node.name == 'load_imerg_interval')
@@ -74,13 +82,15 @@ for item in notebook['cells']:
         BATCH_SATELLITE_PLATFORM = 'Auto'  # Same as the browser: Terra first, then Aqua if unavailable.
         BATCH_SATELLITE_DAY_OFFSET = 0  # Same Japanese calendar date as each weather time.
         BATCH_ACCUMULATION_MODE = 'event_start'  # Running total from event start; 'window' uses the selected window.
+        BATCH_RETRY_INCOMPLETE = False  # Resume saved work first. True explicitly retries saved partial/failed phases.
         if RUN_BATCH:
             reload_catalog_inventory()
             batch_results = run_batch(
                 catalog, hours=BATCH_WINDOW_HOURS, limit=EVENTS_PER_RUN,
                 satellite_platform=BATCH_SATELLITE_PLATFORM,
                 satellite_day_offset=BATCH_SATELLITE_DAY_OFFSET,
-                accumulation_mode=BATCH_ACCUMULATION_MODE)
+                accumulation_mode=BATCH_ACCUMULATION_MODE,
+                retry_incomplete=BATCH_RETRY_INCOMPLETE)
             print('Batch exports:', batch_results.attrs['output_dir'])
             columns = ['event_number', 'offset_hours', 'view_hour_utc', 'satellite_platform', 'status', 'event_pdf']
             display(batch_results[[column for column in columns if column in batch_results]])
@@ -116,8 +126,11 @@ for item in notebook['cells']:
         Phase PDFs remain present as labeled error pages if a phase cannot be loaded; they are
         marked failed and retried on the next run. No missing data are represented as zero.
 
-        Matching completed phase exports are reused. Partial/failed phases retry while the batch
-        continues to later events. Progress is saved after every phase. A disconnect can be
+        Matching saved phase exports are reused, including partial/failed exports whose data gaps
+        remain visible in the manifest. **BATCH_RETRY_INCOMPLETE = False** finishes missing exports
+        first; set it to **True** only for a separate pass to retry saved data gaps.
+        Missing files and changed event/settings identities are rebuilt in either mode.
+        Progress is saved after every newly exported phase. A disconnect can be
         resumed by running setup and this cell with the same settings and Drive folder.
         Underlying ERA5, IMERG, satellite, and vortex caches are reused. One figure is rendered
         at a time in a fresh Python process. That process exits after saving its PNG/PDF,
