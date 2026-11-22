@@ -16,6 +16,8 @@ import zarr
 from .weathernext_atlas import (
     FIELD_PRESETS, LEAD_HOURS, POLYGONS, diagnostic_domain, diagnostic_settings,
     derive_field, forecast_requests, iso_utc, select_forecast, utc_naive, vortex_classification,
+    compact_source_load, convert_field,
+    forecast_input_group,
 )
 
 ERA5_STORE = "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3"
@@ -39,7 +41,7 @@ def polygon_divergence(field):
         weights = np.cos(np.deg2rad(lat[mask]))
         values = field.values[..., mask]
         if not mask.any() or not np.isfinite(values).all():
-            raise ValueError(f"{region} lacks a complete finite set of divergence cells.")
+            raise ValueError(f"{region} lacks a complete finite set of field cells.")
         means[region] = np.average(values, weights=weights, axis=-1)
         counts[region] = int(mask.sum())
     return means, counts
@@ -52,8 +54,9 @@ def open_verification_era5():
     return xr.open_zarr(ERA5_STORE, chunks=None, storage_options={"token": "anon"})
 
 
-def era5_polygon_values(valid_time, era5, *, allow_era5t=False):
-    """Derive divergence from the exact ERA5 925-hPa wind snapshot."""
+def era5_polygon_values(valid_time, era5, *, allow_era5t=False, spec=None):
+    """Evaluate the selected field at the exact ERA5 time and pressure level."""
+    spec = spec or DIVERGENCE_SPEC
     target = utc_naive(valid_time)
     stable = era5.attrs.get('valid_time_stop')
     preliminary = era5.attrs.get('valid_time_stop_era5t')
@@ -63,9 +66,12 @@ def era5_polygon_values(valid_time, era5, *, allow_era5t=False):
             raise ValueError(f'ERA5 pending for {iso_utc(target)}; final through {stable}; '
                              f'ERA5T through {preliminary}. No nearest time is substituted.')
         product = 'ERA5T'
-    winds = era5[list(DIVERGENCE_SPEC.variables)].sel(time=target, level=DIVERGENCE_SPEC.level)
+    winds = era5[list(spec.variables)].sel(time=target)
+    if spec.level is not None:
+        winds = winds.sel(level=spec.level)
     winds = winds.rename({"latitude": "lat", "longitude": "lon"})
-    west, east, south, north = diagnostic_domain(winds, VERIFICATION_DOMAIN)
+    west, east, south, north = (diagnostic_domain(winds, VERIFICATION_DOMAIN)
+                                if spec.key == 'divergence' else VERIFICATION_DOMAIN)
     latitude = slice(south, north) if winds.lat[0] < winds.lat[-1] else slice(north, south)
     longitude = slice(west, east) if winds.lon[0] < winds.lon[-1] else slice(east, west)
     winds = winds.sel(lat=latitude, lon=longitude)
@@ -74,56 +80,74 @@ def era5_polygon_values(valid_time, era5, *, allow_era5t=False):
             (west, east, south, north))):
         raise ValueError("ERA5 grid does not cover the verification domain and its derivative halo.")
     # Decode one wind variable at a time, only after selecting the region.
-    with zarr.config.set({"async.concurrency": 1, "threading.max_workers": 2}):
-        for name in DIVERGENCE_SPEC.variables:
-            winds[name] = winds[name].load(scheduler="synchronous")
+    winds = compact_source_load(winds)
     winds = winds.transpose("lat", "lon").sortby("lat").sortby("lon")
-    field = derive_field(winds, DIVERGENCE_SPEC, VERIFICATION_DOMAIN).value
+    field = (derive_field(winds, spec, VERIFICATION_DOMAIN) if spec.key == 'divergence'
+             else convert_field(winds, spec)).value
     means, counts = polygon_divergence(field)
     return {"valid_time": iso_utc(target), "source_store": ERA5_STORE, "polygon_cells": counts,
             "reference_product": product, "archive_last_updated": str(era5.attrs.get('last_updated', '')),
             "values": {region: float(value) for region, value in means.items()}}
 
 
-def forecast_polygon_values(archive, request, progress=print):
+def forecast_polygon_values(archive, request, progress=print, *, spec=None, group_cache=None,
+                            member_start=0, member_stop=64):
     """Read groups of native WN2 samples and immediately reduce each field to two means."""
+    spec = spec or DIVERGENCE_SPEC
     store, ds = archive.run(request["init_time"])
     labels = [str(value) for value in ds.sample.values.tolist()]
     if len(labels) != ENSEMBLE_SIZE or len(set(labels)) != ENSEMBLE_SIZE:
         raise ValueError(f"Expected {ENSEMBLE_SIZE} distinct WN2 member labels, found {len(set(labels))}.")
     snap = select_forecast(
-        ds, request["init_time"], request["lead_hours"], None, DIVERGENCE_SPEC.variables,
-        DIVERGENCE_SPEC.level, diagnostic_domain(ds, VERIFICATION_DOMAIN),
+        ds, request["init_time"], request["lead_hours"], None, spec.variables,
+        spec.level, diagnostic_domain(ds, VERIFICATION_DOMAIN) if spec.key == 'divergence' else VERIFICATION_DOMAIN,
     )
-    winds = snap[DIVERGENCE_SPEC.variables[0]]
-    sizes = winds.chunksizes.get("sample", (4,) * (ENSEMBLE_SIZE // 4))
+    # Source groups are at most four members; never decode all 64 together.
+    if not (0<=member_start<member_stop<=ENSEMBLE_SIZE and member_start%4==0 and member_stop%4==0):
+        raise ValueError('Member ranges must cover complete native four-member groups.')
+    sizes = (4,) * ((member_stop-member_start)//4)
     values = {region: [] for region in POLYGONS}
-    start = 0
+    start = member_start
     for size in sizes:
         end = start + size
         progress(f"  Reading {request['lead_days']}-day members {start + 1}–{end} of {ENSEMBLE_SIZE}")
-        block = snap.isel(sample=slice(start, end))
-        with zarr.config.set({"async.concurrency": 1, "threading.max_workers": 2}):
-            for name in DIVERGENCE_SPEC.variables:
-                block[name] = block[name].load(scheduler="synchronous")
-        field = derive_field(block, DIVERGENCE_SPEC, VERIFICATION_DOMAIN).value
-        means, counts = polygon_divergence(field)
+        identity = json.loads(json.dumps(dict(store=store, init_time=iso_utc(request['init_time']),
+            lead_hours=int(request['lead_hours']), members=labels[start:end], field=spec.key, level=spec.level,
+            units=spec.units, domain=VERIFICATION_DOMAIN, polygons=POLYGONS,
+            diagnostic=diagnostic_settings(ds, spec, VERIFICATION_DOMAIN)),sort_keys=True))
+        path = Path(group_cache)/f'group_{start:02d}_{end:02d}.json' if group_cache else None
+        def calculate_group():
+            block = forecast_input_group(archive,store,ds,request,spec,
+                diagnostic_domain(ds,VERIFICATION_DOMAIN),start,end)
+            field = (derive_field(block, spec, VERIFICATION_DOMAIN) if spec.key == 'divergence'
+                     else convert_field(block, spec)).value
+            means, counts = polygon_divergence(field)
+            return dict(values={region:np.asarray(value).tolist() for region,value in means.items()},
+                        polygon_cells=counts)
+        group, _ = checkpoint(path, identity, calculate_group) if path else (calculate_group(), False)
+        counts = group['polygon_cells']
         for region in POLYGONS:
-            values[region].extend(means[region].tolist())
+            if len(group['values'][region]) != size or not np.isfinite(group['values'][region]).all():
+                raise ValueError('Invalid saved member-group values.')
+            values[region].extend(group['values'][region])
         start = end
     return {"init_time": iso_utc(request["init_time"]), "valid_time": iso_utc(request["valid_time"]),
-            "lead_hours": request["lead_hours"], "source_store": store, "members": labels,
+            "lead_hours": request["lead_hours"], "source_store": store, "members": labels[member_start:member_stop],
             "polygon_cells": counts, "values": values}
 
 
-def checkpoint_identity(archive):
+def checkpoint_identity(archive, spec=None):
     """Reuse verified values only with the same fields, polygons and source configuration."""
-    return {
+    spec = spec or DIVERGENCE_SPEC
+    result = {
         "version": CHECKPOINT_VERSION, "era5_store": ERA5_STORE, "wn2_root": archive.root,
         "wn2_overrides": archive.overrides, "domain": VERIFICATION_DOMAIN, "polygons": POLYGONS,
-        "pressure_hpa": DIVERGENCE_SPEC.level, "ensemble_size": ENSEMBLE_SIZE,
-        "diagnostic": diagnostic_settings(None, DIVERGENCE_SPEC, VERIFICATION_DOMAIN),
+        "pressure_hpa": spec.level, "ensemble_size": ENSEMBLE_SIZE,
+        "diagnostic": diagnostic_settings(None, spec, VERIFICATION_DOMAIN),
     }
+    if spec != DIVERGENCE_SPEC:
+        result.update(field=spec.key, units=spec.units)
+    return result
 
 
 def atomic_json_file(path, payload):
@@ -186,9 +210,10 @@ def case_identity(row):
 
 
 def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_verification_era5,
-                              allow_era5t=False, progress=print):
+                              allow_era5t=False, progress=print, spec=None, job_runner=None):
     """Checkpoint one ERA5 target and each WN2 run/lead independently."""
-    identity = checkpoint_identity(archive)
+    spec = spec or DIVERGENCE_SPEC
+    identity = checkpoint_identity(archive, spec)
     signature = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
     cache = Path(output_dir) / "checkpoints" / signature
     member_rows, reference_rows, rank_rows, status_rows = [], [], [], []
@@ -200,7 +225,7 @@ def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_
         progress(f"Event {event['event_number']} | verification {event['valid_time_utc']}")
         reference = None
         try:
-            progress("  ERA5: opening the reference archive and reading one 925-hPa wind snapshot")
+            progress(f"  ERA5: reading one {spec.title} snapshot (or reusing its checkpoint)")
             reference_path = cache / f"era5_{stamp}.json"
             # Preliminary data can change. Refresh it on every run, including when it
             # has become final. Forecast checkpoints remain independent and reusable.
@@ -213,11 +238,14 @@ def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_
                     pass
             reference, cached = checkpoint(
                 reference_path, {"valid_time": event["valid_time_utc"]},
-                lambda: era5_polygon_values(target, era5_reader(), allow_era5t=allow_era5t),
+                lambda: (job_runner('reference', dict(valid_time=iso_utc(target), allow_era5t=allow_era5t, spec=spec.__dict__))
+                         if job_runner else era5_polygon_values(target, era5_reader(), allow_era5t=allow_era5t, spec=spec)),
             )
             reference_rows.extend([
-                {**event, "polygon": region, "pressure_hpa": DIVERGENCE_SPEC.level,
-                 DIVERGENCE_COLUMN: reference["values"][region],
+                {**event, "polygon": region, "pressure_hpa": spec.level,
+                 'field':spec.key, 'field_title':spec.title, 'units':spec.units,
+                 'value':reference['values'][region],
+                 **({DIVERGENCE_COLUMN:reference['values'][region]} if spec.key=='divergence' else {}),
                  "polygon_cells": reference["polygon_cells"][region], "source_store": reference["source_store"],
                  "reference_product": reference.get('reference_product', 'ERA5')}
                 for region in POLYGONS
@@ -241,7 +269,10 @@ def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_
                 forecast, cached = checkpoint(
                     cache / f"wn2_{stamp}_lead{lead:03d}h.json",
                     {"init_time": timing["init_time_utc"], "lead_hours": lead, "valid_time": event["valid_time_utc"]},
-                    lambda: forecast_polygon_values(archive, request, progress),
+                    lambda: (job_runner('forecast',dict(request={k:iso_utc(v) if isinstance(v,pd.Timestamp) else v
+                        for k,v in request.items()}, spec=spec.__dict__, group_cache=str(cache/f'groups_{stamp}_{lead:03d}h')))
+                        if job_runner else forecast_polygon_values(archive, request, progress, spec=spec,
+                            group_cache=cache/f'groups_{stamp}_{lead:03d}h')),
                 )
                 members = forecast["members"]
                 if len(members) != ENSEMBLE_SIZE or len(set(members)) != ENSEMBLE_SIZE:
@@ -251,8 +282,10 @@ def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_
                     values = np.asarray(forecast["values"][region], dtype=float)
                     if values.shape != (ENSEMBLE_SIZE,) or not np.isfinite(values).all():
                         raise ValueError(f"{region} does not contain 64 finite member values.")
-                    info = {**event, **timing, "polygon": region, "pressure_hpa": DIVERGENCE_SPEC.level}
-                    case_values.extend({**info, "member": member, DIVERGENCE_COLUMN: value,
+                    info = {**event, **timing, "polygon": region, "pressure_hpa": spec.level,
+                            'field':spec.key, 'field_title':spec.title, 'units':spec.units}
+                    case_values.extend({**info, "member": member, 'value':value,
+                                        **({DIVERGENCE_COLUMN:value} if spec.key=='divergence' else {}),
                                         "polygon_cells": forecast["polygon_cells"][region],
                                         "source_store": forecast["source_store"]} for member, value in zip(members, values))
                     if reference is not None:
@@ -260,9 +293,11 @@ def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_
                         rank = observation_rank(values, observed, f"{row.review_key}|{lead}|{region}")
                         case_ranks.append({**info, "member_count": len(members),
                                            "reference_product": reference.get('reference_product', 'ERA5'),
-                                           "era5_divergence_1e5_s-1": observed,
-                                           "member_min_1e5_s-1": values.min(), "member_mean_1e5_s-1": values.mean(),
-                                           "member_max_1e5_s-1": values.max(), **rank})
+                                           'era5_value':observed, 'member_min':values.min(),
+                                           'member_mean':values.mean(), 'member_max':values.max(),
+                                           **({'era5_divergence_1e5_s-1':observed,
+                                               'member_min_1e5_s-1':values.min(), 'member_mean_1e5_s-1':values.mean(),
+                                               'member_max_1e5_s-1':values.max()} if spec.key=='divergence' else {}), **rank})
                 member_rows.extend(case_values)
                 event_ranks.extend(case_ranks)
                 status.update(wn2_status="cached" if cached else "computed", wn2_error="")
@@ -270,7 +305,13 @@ def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_
                 message = f"{type(error).__name__}: {error}"
                 status.update(wn2_status="failed", wn2_error=message)
                 progress(f"  {request['lead_days']}-day forecast unavailable: {message}")
-            status_rows.append(status)
+            status_rows.append({**status,'field':spec.key,'field_title':spec.title,'pressure_hpa':spec.level,'units':spec.units})
+            # Keep a lightweight progress table even if the kernel stops during the next lead.
+            progress_path = Path(output_dir)/'progress'/signature/'batch_status.csv'
+            progress_path.parent.mkdir(parents=True,exist_ok=True)
+            temporary = progress_path.with_suffix('.tmp.csv')
+            pd.DataFrame(status_rows).to_csv(temporary,index=False)
+            temporary.replace(progress_path)
         common_sample = len(event_ranks) == len(LEAD_HOURS) * len(POLYGONS)
         for record in event_ranks:
             record["in_common_sample"] = common_sample
@@ -285,6 +326,8 @@ def run_ensemble_verification(catalog, archive, output_dir, *, era5_reader=open_
 
 def rank_histogram_counts(ranks, *, grouped=True):
     """Count every rank, including empty bins, using common cases at each lead."""
+    if 'field' in ranks and ranks['field'].nunique()>1:
+        raise ValueError('Plot each verification field separately; do not pool different variables.')
     if ranks.empty or not ranks.in_common_sample.any():
         raise ValueError("No event has complete ERA5 and all three WN2 leads.")
     complete = ranks.loc[ranks.in_common_sample]
@@ -335,10 +378,13 @@ def plot_rank_histograms(ranks, *, grouped=True, title_suffix='All events'):
             ax.yaxis.get_major_locator().set_params(integer=True)
             if c == 0:
                 ax.set_ylabel("Number of events")
-    fig.suptitle(f"{title_suffix} · 925-hPa polygon-average divergence at the onset target · {n_events} matched "
+    field_title = str(ranks.field_title.iloc[0]) if 'field_title' in ranks else '925-hPa horizontal divergence'
+    convergence = 'field' not in ranks or ranks['field'].eq('divergence').all()
+    fig.suptitle(f"{title_suffix} · {field_title} polygon mean at the onset target · {n_events} matched "
                  f"{'event' if n_events == 1 else 'events'}\n"
                  f"{'13 ranks' if grouped else '1 rank'} per bar · dashed line = uniform rank reference\n"
-                 "Lower rank = ERA5 more convergent relative to forecasts · Higher rank = ERA5 less convergent")
+                 + ("Lower rank = ERA5 more convergent relative to forecasts · Higher rank = ERA5 less convergent"
+                    if convergence else 'Lower rank = ERA5 lower relative to forecasts · Higher rank = ERA5 higher'))
     return fig
 
 
@@ -346,7 +392,8 @@ def ordered_verification_values(members, ranks):
     """Pool 64 forecast values and ERA5, preserving the exact saved tie-broken rank."""
     keys = ["review_key", "polygon", "lead_hours"]
     columns = [*keys, "event_number", "valid_time_utc", "init_time_utc", "lead_days", "pressure_hpa",
-               "in_common_sample", "position", "bin_number", "rank_range", "source", "member", DIVERGENCE_COLUMN]
+               "in_common_sample", "position", "bin_number", "rank_range", "source", "member", DIVERGENCE_COLUMN,
+               'value','field','field_title','units','vortex_label','vortex_scan_status','vortex_classification']
     if ranks.empty:
         return pd.DataFrame(columns=columns)
     if ranks.duplicated(keys).any():
@@ -358,8 +405,9 @@ def ordered_verification_values(members, ranks):
         group = groups.get(key)
         if group is None or len(group) != ENSEMBLE_SIZE or group.member.astype(str).nunique() != ENSEMBLE_SIZE:
             raise ValueError(f"Ordered values require 64 distinct members for {key}.")
-        values = group[DIVERGENCE_COLUMN].to_numpy(dtype=float)
-        observed = rank["era5_divergence_1e5_s-1"]
+        value_column = 'value' if 'value' in group else DIVERGENCE_COLUMN
+        values = group[value_column].to_numpy(dtype=float)
+        observed = rank['era5_value'] if 'era5_value' in rank else rank['era5_divergence_1e5_s-1']
         if not np.isfinite(values).all() or not np.isfinite(observed):
             raise ValueError(f"Ordered values contain missing or nonfinite divergence for {key}.")
         position = int(rank["era5_rank"])
@@ -367,14 +415,19 @@ def ordered_verification_values(members, ranks):
         upper = lower + int((values == observed).sum())
         if not lower <= position <= upper:
             raise ValueError(f"Saved ERA5 rank disagrees with the member values for {key}.")
-        ordered = group.sort_values(DIVERGENCE_COLUMN, kind="stable")
+        ordered = group.sort_values(value_column, kind="stable")
         entries = [
-            {"source": "WN2", "member": str(item["member"]), DIVERGENCE_COLUMN: float(item[DIVERGENCE_COLUMN])}
+            {"source": "WN2", "member": str(item["member"]), 'value':float(item[value_column])}
             for item in ordered.to_dict("records")
         ]
-        entries.insert(position - 1, {"source": "ERA5", "member": "", DIVERGENCE_COLUMN: float(observed)})
+        entries.insert(position - 1, {"source": "ERA5", "member": "", 'value':float(observed)})
         info = {name: rank[name] for name in columns[:9]}
+        info.update(field=rank.get('field','divergence'),field_title=rank.get('field_title','925-hPa horizontal divergence'),
+                    units=rank.get('units','10⁻⁵ s⁻¹'),vortex_label=rank.get('vortex_label',''),
+                    vortex_scan_status=rank.get('vortex_scan_status',''),
+                    vortex_classification=rank.get('vortex_classification',vortex_classification(rank)))
         for index, entry in enumerate(entries):
+            if info['field']=='divergence':entry[DIVERGENCE_COLUMN]=entry['value']
             bin_index = index // 13
             records.append({**info, "position": index + 1, "bin_number": bin_index + 1,
                             "rank_range": RANK_GROUPS[bin_index], **entry})
@@ -397,11 +450,15 @@ def write_ordered_bins(writer, ordered, ranks):
     value_format = book.add_format({"num_format": "0.000000"})
     era5_value_format = book.add_format({"num_format": "0.000000", "bold": True, "bg_color": "#DDF0DE"})
     era5_label_format = book.add_format({"bold": True, "bg_color": "#DDF0DE"})
-    sheet.merge_range(0, 0, 0, 14, "Ordered 925-hPa polygon-average divergence", title_format)
+    title = str(ranks.field_title.iloc[0]) if len(ranks) and 'field_title' in ranks else '925-hPa polygon-average divergence'
+    units = str(ranks.units.iloc[0]) if len(ranks) and 'units' in ranks else '10⁻⁵ s⁻¹'
+    convergence_note = (' Negative divergence is convergence.' if 'field' not in ranks
+                        or (not ranks.empty and ranks.field.eq('divergence').all()) else '')
+    sheet.merge_range(0, 0, 0, 14, 'Ordered '+title, title_format)
     sheet.merge_range(1, 0, 2, 14,
-                      "Each block contains 64 WN2 member values and one ERA5 value, sorted from lowest divergence "
-                      "(strongest convergence) to highest divergence. ERA5 is labeled and highlighted. "
-                      "Values are in 10⁻⁵ s⁻¹. Histogram counts use only ERA5's saved position.", note_format)
+                      'Each block contains 64 WN2 values and one ERA5 value, sorted from lowest to highest. '
+                      f'ERA5 is highlighted. Values are in {units}.{convergence_note} '
+                      "Histogram counts use only ERA5's saved position.", note_format)
     for bin_index in range(5):
         start = bin_index * 3
         sheet.set_column(start, start, 8)
@@ -416,7 +473,7 @@ def write_ordered_bins(writer, ordered, ranks):
     for key, group in ordered.groupby(keys, sort=False):
         case = rank_lookup[key]
         sheet.merge_range(row, 0, row, 14,
-                          f"Event {case['event_number']} · {case['polygon']} · {case['lead_days']}-day lead · 925 hPa",
+                          f"Event {case['event_number']} · {case['polygon']} · {case['lead_days']}-day lead · {case['pressure_hpa']} hPa",
                           title_format)
         sheet.merge_range(row + 1, 0, row + 1, 14,
                           f"Valid {case['valid_time_utc']} · Initialized {case['init_time_utc']} · "
@@ -426,7 +483,7 @@ def write_ordered_bins(writer, ordered, ranks):
             start = bin_index * 3
             sheet.merge_range(row + 2, start, row + 2, start + 2,
                               f"Bin {bin_index + 1} · ranks {label}", bin_format)
-            for offset, text in enumerate(("Position", "Source", "D (10⁻⁵ s⁻¹)")):
+            for offset, text in enumerate(("Position", "Source", f'Value ({units})')):
                 sheet.write(row + 3, start + offset, text, header_format)
         for item in group.to_dict("records"):
             cell_row = row + 4 + (item["position"] - 1) % 13
@@ -436,7 +493,7 @@ def write_ordered_bins(writer, ordered, ranks):
             sheet.write_number(cell_row, cell_col, item["position"], label_format)
             source = "ERA5" if item["source"] == "ERA5" else f"WN2 sample {item['member']}"
             sheet.write_string(cell_row, cell_col + 1, source, label_format)
-            sheet.write_number(cell_row, cell_col + 2, item[DIVERGENCE_COLUMN], number_format)
+            sheet.write_number(cell_row, cell_col + 2, item['value'] if 'value' in item else item[DIVERGENCE_COLUMN], number_format)
         row += 19
     sheet.print_area(0, 0, row - 1, 14)
 
@@ -528,8 +585,8 @@ def scheduled_verification_catalog(start, end, *, interval_hours=24, months=(11,
     return frame
 
 
-def reliability_probabilities(members, ranks, thresholds, *, sample='event_conditioned'):
-    """P(D925 snapshot < threshold) from all 64 members and binary ERA5 outcome.
+def reliability_probabilities(members, ranks, thresholds, *, sample='event_conditioned', direction='less'):
+    """A selected-field threshold probability from all 64 members and binary ERA5 outcome.
 
     This is instantaneous polygon convergence, not the hourly trailing-D12 JPCZ detector.
     Only the common all-lead sample enters, exactly as in the rank histograms.
@@ -537,10 +594,12 @@ def reliability_probabilities(members, ranks, thresholds, *, sample='event_condi
     if sample not in ('event_conditioned', 'scheduled_winter'):
         raise ValueError('Unknown reliability sampling design.')
     if set(thresholds) != set(POLYGONS) or not np.isfinite(list(thresholds.values())).all():
-        raise ValueError('Supply one finite snapshot threshold (10^-5 s^-1) per polygon.')
+        raise ValueError('Supply one finite snapshot threshold in the selected field units per polygon.')
+    if direction not in ('less','greater'):raise ValueError('Choose less or greater for the probability threshold.')
     keys = ['review_key', 'polygon', 'lead_hours']
     columns = [*keys, 'lead_days', 'valid_time_utc', 'event_number', 'vortex_label', 'vortex_scan_status',
-               'sample', 'threshold_1e5_s-1', 'member_count', 'forecast_probability', 'observed', 'brier_score']
+               'sample', 'threshold_1e5_s-1', 'member_count', 'forecast_probability', 'observed', 'brier_score',
+               'threshold','direction','field','field_title','units','pressure_hpa']
     if ranks.empty:
         return pd.DataFrame(columns=columns)
     if ranks.duplicated(keys).any():
@@ -552,17 +611,20 @@ def reliability_probabilities(members, ranks, thresholds, *, sample='event_condi
         frame = groups.get(key)
         if frame is None or len(frame) != ENSEMBLE_SIZE or frame.member.astype(str).nunique() != ENSEMBLE_SIZE:
             raise ValueError(f'Reliability requires 64 distinct members for {key}.')
-        values = frame[DIVERGENCE_COLUMN].to_numpy(dtype=float)
-        observed_value = float(row['era5_divergence_1e5_s-1'])
+        values = frame['value' if 'value' in frame else DIVERGENCE_COLUMN].to_numpy(dtype=float)
+        observed_value = float(row['era5_value'] if 'era5_value' in row else row['era5_divergence_1e5_s-1'])
         if not np.isfinite(values).all() or not np.isfinite(observed_value):
             raise ValueError('Reliability inputs must be finite.')
         threshold = float(thresholds[row['polygon']])
-        probability = float(np.mean(values < threshold))
-        observed = int(observed_value < threshold)
+        probability = float(np.mean(values < threshold if direction=='less' else values > threshold))
+        observed = int(observed_value < threshold if direction=='less' else observed_value > threshold)
         rows.append({**{name: row.get(name, '') for name in columns[:8]},
-                     'sample': sample, 'threshold_1e5_s-1': threshold, 'member_count': ENSEMBLE_SIZE,
+                     'sample': sample, 'threshold_1e5_s-1': threshold if row.get('field','divergence')=='divergence' else np.nan,
+                     'member_count': ENSEMBLE_SIZE,
                      'forecast_probability': probability, 'observed': observed,
-                     'brier_score': (probability - observed)**2})
+                     'brier_score': (probability - observed)**2, 'threshold':threshold,'direction':direction,
+                     'field':row.get('field','divergence'),'field_title':row.get('field_title','925-hPa divergence'),
+                     'units':row.get('units','10⁻⁵ s⁻¹'),'pressure_hpa':row.get('pressure_hpa',925)})
     return pd.DataFrame(rows, columns=columns)
 
 
@@ -592,6 +654,8 @@ def reliability_bin_counts(probabilities, *, n_bins=10):
                 half = z * np.sqrt(frequency*(1-frequency)/n + z*z/(4*n*n)) / denominator if n else np.nan
                 rows.append({'polygon': region, 'lead_days': lead // 24, 'sample': subset['sample'].iloc[0],
                              'threshold_1e5_s-1': subset['threshold_1e5_s-1'].iloc[0],
+                             'threshold':subset['threshold'].iloc[0] if 'threshold' in subset else subset['threshold_1e5_s-1'].iloc[0],
+                             'direction':subset['direction'].iloc[0] if 'direction' in subset else 'less',
                              'bin_number': index + 1, 'probability_from': index/n_bins,
                              'probability_through': (index+1)/n_bins, 'case_count': n, 'observed_count': hits,
                              'mean_forecast_probability': p[mask].mean() if n else np.nan,
@@ -603,7 +667,7 @@ def reliability_bin_counts(probabilities, *, n_bins=10):
         'polygon', 'lead_days', 'sample', 'threshold_1e5_s-1', 'bin_number',
         'probability_from', 'probability_through', 'case_count', 'observed_count',
         'mean_forecast_probability', 'observed_frequency', 'wilson_lower', 'wilson_upper',
-        'panel_cases', 'base_rate', 'brier_score'])
+        'panel_cases', 'base_rate', 'brier_score','threshold','direction'])
 
 
 def plot_reliability_diagrams(probabilities, *, n_bins=10, title_suffix='All'):
@@ -632,7 +696,8 @@ def plot_reliability_diagrams(probabilities, *, n_bins=10, title_suffix='All'):
             ax.set(xlim=(-.03, 1.03), ylim=(-.03, 1.03), xlabel='Forecast probability',
                    ylabel='Observed ERA5 frequency',
                    title=f'{region} · {lead // 24}-day · N={int(bins.panel_cases.iloc[0])}\n'
-                         f'D < {bins["threshold_1e5_s-1"].iloc[0]:g} × 10⁻⁵ s⁻¹ · BS={bins.brier_score.iloc[0]:.3f}')
+                         f'{"<" if bins.direction.iloc[0]=="less" else ">"} {bins["threshold"].iloc[0]:g} '
+                         f'{probabilities["units"].iloc[0] if "units" in probabilities else "10⁻⁵ s⁻¹"} · BS={bins.brier_score.iloc[0]:.3f}')
             inset = ax.inset_axes([.58, .10, .35, .22])
             inset.bar((bins.probability_from+bins.probability_through)/2, bins.case_count,
                       width=.9/n_bins, color='#92b8c1')
@@ -640,22 +705,23 @@ def plot_reliability_diagrams(probabilities, *, n_bins=10, title_suffix='All'):
             inset.tick_params(labelsize=6)
             inset.title.set_fontsize(7)
     design = probabilities['sample'].iloc[0]
-    description = ('Event-conditioned convergence reliability (ERA5-selected events)'
-                   if design == 'event_conditioned' else 'Scheduled winter convergence reliability (crossings and non-crossings)')
+    description = ('Event-conditioned reliability (ERA5-selected events)'
+                   if design == 'event_conditioned' else 'Scheduled winter reliability (crossings and non-crossings)')
+    field_title = str(probabilities.field_title.iloc[0]) if 'field_title' in probabilities else '925-hPa divergence'
     fig.suptitle(f'{description} · {title_suffix}\n'
-                 'Instantaneous 925-hPa polygon mean; 64 members; common all-lead cases\n'
+                 f'Instantaneous {field_title} polygon mean; 64 members; common all-lead cases\n'
                  'Dashed: perfect reliability · dotted: sample base rate · bars: pointwise Wilson 95% (dependence ignored)')
     return fig
 
 
-def export_reliability(tables, destination, thresholds, *, sample='event_conditioned', group='All', n_bins=10):
+def export_reliability(tables, destination, thresholds, *, sample='event_conditioned', group='All', n_bins=10, direction='less'):
     """Refresh probability tables and plots from the current sample, never append old aggregates."""
     import matplotlib.pyplot as plt
 
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     ranks = verification_subset(tables, group)
-    probabilities = reliability_probabilities(tables['member_values'], ranks, thresholds, sample=sample)
+    probabilities = reliability_probabilities(tables['member_values'], ranks, thresholds, sample=sample,direction=direction)
     bins = reliability_bin_counts(probabilities, n_bins=n_bins)
     probabilities.to_csv(destination / 'reliability_probabilities.csv', index=False)
     bins.to_csv(destination / 'reliability_bins.csv', index=False)
@@ -672,8 +738,8 @@ def export_reliability(tables, destination, thresholds, *, sample='event_conditi
         for name in ('reliability_summary.csv', 'reliability_diagrams.png', 'reliability_diagrams.pdf'):
             (destination / name).unlink(missing_ok=True)
     atomic_json_file(destination / 'reliability_settings.json', {
-        'sample': sample, 'group': group, 'thresholds_1e5_s-1': thresholds, 'n_bins': n_bins,
-        'criterion': 'instantaneous polygon divergence strictly less than threshold',
+        'sample': sample, 'group': group, 'thresholds':thresholds,'direction':direction, 'n_bins': n_bins,
+        'criterion': f'instantaneous polygon mean strictly {direction} than threshold',
         'common_sample': 'ERA5 + 64 WN2 members at every lead and both polygons',
         'not_catalog_D12_event_probability': True,
     })

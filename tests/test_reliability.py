@@ -125,7 +125,7 @@ def test_added_event_and_revised_era5t_refresh_plots_without_redownloading_wn2(t
                 'polygon_cells': {region: 10 for region in v.POLYGONS},
                 'source_store': 'test-era5', 'reference_product':
                 ('ERA5T' if time == dates[1] and not revised else 'ERA5')}
-    def forecast(archive, request, progress):
+    def forecast(archive, request, progress, **kwargs):
         forecast_calls.append(request)
         return {'members': [str(i) for i in range(64)],
                 'values': {region: np.arange(64).tolist() for region in v.POLYGONS},

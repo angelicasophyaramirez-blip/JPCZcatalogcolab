@@ -3,6 +3,7 @@ import ast
 import json
 from pathlib import Path
 import textwrap
+from build_forecast_worker import worker_bootstrap_source
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src/jpcz_catalog/weathernext_atlas.py"
@@ -221,8 +222,10 @@ cells = [
     timing-error and ensemble-spread validation require later workflows.
     """),
     cell("code", '# @title Load event-browser helpers (run unchanged)\n' + ui),
+    cell('code','# @title Load bounded forecast batch runtime\n'+worker_bootstrap_source()),
     cell("code", """
-    archive = GoogleCloudArchive(credentials, PROJECT_ID or detected_project or '', overrides=RUN_OVERRIDES)
+    archive = GoogleCloudArchive(credentials, PROJECT_ID or detected_project or '', overrides=RUN_OVERRIDES, lazy_indexing=True,
+                                 input_cache_dir=DRIVE_ROOT / 'wn2_shared_inputs')
     browser = WeatherNextBrowser(catalog, archive, OUTPUT_DIR, NOTEBOOK35_DIR,
                                  catalog_loader=reload_current_catalog)
     browser.display()
@@ -231,17 +234,25 @@ cells = [
     ## 7 · Optional: export the catalog after the pilot works
 
     Leave this off while checking the first event. To run later, set `RUN_BATCH = True`.
-    This uses the **last successfully displayed pilot's one member, two fields, map domains,
-    and scales** throughout. It does not use unapplied control changes. Each event has six
-    plots plus an overview; PNG/PDF files, metadata, settings, and attribution are saved.
-    Progress is checkpointed after every event. Reruns reuse regional cache entries and
-    completed matching exports; missing or failed events remain visible in the progress CSV.
+    This keeps the **last displayed pilot's native member label**. The default batch requests
+    only **derived 925-hPa divergence**, with three leads and one overview per event.
+    Set BATCH_FIELDS to None to use both displayed pilot rows, or list the fields/levels/domains
+    you want. Field selection does not change the selected member or the onset target.
+    Negative divergence is convergence; values retain their signs.
+
+    Completed figures are checked before any archive access. Each unfinished event runs in
+    a fresh process, saves its PNG/PDF/CSV outputs and regional caches, then exits to release
+    its source/plot buffers. Progress is saved per event. Matching exports are reused after
+    restart, and failed events remain visible. A figure_index.csv records saved PDF/PNG paths
+    for later Drive-only report assembly. That assembly will not fetch or recalculate fields.
     """),
     cell("code", """
     RUN_BATCH = False
     BATCH_LIMIT = None  # use 2 for a small pilot, or None for all selected events
+    BATCH_FIELDS = [{'field':'divergence', 'level':925, 'domain':(125.,145.,33.,47.)}]
     if RUN_BATCH:
-        display(export_catalog_single_member(browser, limit=BATCH_LIMIT))
+        display(export_catalog_single_member(browser, limit=BATCH_LIMIT, fields=BATCH_FIELDS,
+            job_runner=make_forecast_job_runner(archive)))
     else:
         print('Batch is off. Use the browser to validate one event first.')
     """),

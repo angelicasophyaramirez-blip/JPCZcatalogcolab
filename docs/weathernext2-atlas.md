@@ -83,13 +83,21 @@ The standalone Notebook 35 label patch is maintained by
 
 ## Maps and output
 
-Each event/member export contains:
+The interactive two-row browser export contains:
 
 - Six individual forecast plots, each as PNG and PDF.
 - One two-row, three-column overview, as PNG and PDF.
 - `forecast_metadata.csv`: six records with event identity, member label, lead,
   initialization, valid time, units, domain, scale, source store, and cache identity.
 - `settings.json`, historical-data attribution, and a completion marker.
+
+The optional batch now defaults to **925-hPa divergence only**, with three individual
+lead maps and one single-row overview per event/member. `BATCH_FIELDS = None` uses the
+browser's two rows instead. Completed exports are checked before archive access; new
+events run in separate processes and save progress plus a `figure_index.csv` in Drive.
+See [the batch and saved-output workflow](forecast-batch-workflow.md) for configurable
+fields, shared native-input caches, Notebook 37's all-member verification, and the
+single-sheet Excel collector.
 
 The two row domains, scales, variables, and levels are adjustable through widgets.
 All three leads in each row use identical scales and domains. The scale stays fixed across

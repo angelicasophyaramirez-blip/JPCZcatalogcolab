@@ -4,6 +4,7 @@ import ast
 import json
 from pathlib import Path
 import textwrap
+from build_forecast_worker import worker_bootstrap_source
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src/jpcz_catalog"
@@ -27,6 +28,11 @@ verification = (PACKAGE / "ensemble_verification.py").read_text()
 imports = next(node for node in ast.parse(verification).body
                if isinstance(node, ast.ImportFrom) and node.module == "weathernext_atlas")
 verification = verification.replace(ast.get_source_segment(verification, imports), "", 1)
+workflow = (PACKAGE/'verification_workflow.py').read_text()
+relative_imports=[ast.get_source_segment(workflow,node) for node in ast.parse(workflow).body
+                  if isinstance(node,ast.ImportFrom) and node.level]
+for source in relative_imports:workflow=workflow.replace(source,'',1)
+verification += '\n\n'+workflow
 
 cells = [
     cell("markdown", """
@@ -40,6 +46,13 @@ cells = [
     reports six ERA5 ranks. Each event contributes one rank per polygon and lead. Synced Drive
     checkpoints allow each completed ERA5 target and forecast lead to be reused after a
     runtime disconnect.
+
+    The default batch is divergence only. Section 3a's `VERIFY_FIELDS` also accepts native
+    **u/v components**, wind speed derived from them, geopotential, and geopotential height
+    at a chosen pressure level. Each selection keeps its own units, ranks and diagrams.
+    Set `LOAD_SAVED_RESULTS_ONLY = True` after retrieval to rebuild reports from Drive
+    tables. Section 5 collects the saved values into one Excel sheet without weather-field
+    retrieval or recalculation.
 
     Run sections 1–5 in this notebook. Its archive reader and rank calculation are included
     below. Each helper cell prints a confirmation when it finishes.
@@ -104,12 +117,20 @@ cells = [
     STUDY_START_UTC = '2023-01-01'  # @param {type:"date"}
     STUDY_END_UTC = ''  # @param {type:"string"} # Optional exclusive UTC date.
     ALLOW_ERA5T = True  # Use and label preliminary references; refresh them on every rerun.
+    LOAD_SAVED_RESULTS_ONLY = False  # True: read saved CSVs only; no weather downloads or field calculations.
+    VERIFY_FIELDS = [
+        {'field':'divergence', 'level':925, 'threshold':-2.0, 'direction':'less'},
+    ]
+    # Other supported fields: 'u', 'v', 'winds' (speed derived from u/v), 'geopotential', 'height'.
+    # Each gets separate ranks, units, checkpoints, and plots. Add a threshold in that field's
+    # displayed units before using reliability diagrams; None exports ranks/values only.
     RUN_OVERRIDES = {}
     """),
     cell("code", "# @title 3b · Load WeatherNext archive helpers (in this notebook)\n" + atlas
          + "\nprint('Archive helpers loaded. Continue to section 3c.')\n"),
     cell("code", "# @title 3c · Load rank and Excel helpers (in this notebook)\n" + verification
          + "\nprint('Verification helpers loaded. Continue to section 3d.')\n"),
+    cell('code','# @title 3c2 · Load bounded forecast batch runtime\n'+worker_bootstrap_source()),
     cell("code", """
     # @title 3d · Preview the selected catalog
     from IPython.display import display
@@ -133,8 +154,10 @@ cells = [
     else:
         selected = catalog
         result_directory = OUTPUT_DIR / 'catalog'
+    base_result_directory = result_directory
     archive = GoogleCloudArchive(credentials, PROJECT_ID or detected_project or '',
-                                 overrides=RUN_OVERRIDES, lazy_indexing=True)
+                                 overrides=RUN_OVERRIDES, lazy_indexing=True,
+                                 input_cache_dir=DRIVE_ROOT / 'wn2_shared_inputs')
     print(f'{len(catalog)} events in the study window. {RUN_MODE} will process {len(selected)}.')
     if RUN_MODE == 'Pilot':
         print('Pilot contributes ONE ERA5 rank to each histogram. Choose Catalog to aggregate all selected events.')
@@ -188,8 +211,16 @@ cells = [
     # Clear stale archive metadata/listings when retrying a newly published date.
     open_verification_era5.cache_clear()
     archive.clear()
-    tables, calculation_settings = run_ensemble_verification(
-        selected, archive, OUTPUT_DIR, allow_era5t=ALLOW_ERA5T)
+    field_runs = run_verification_fields(selected, archive, OUTPUT_DIR, base_result_directory, VERIFY_FIELDS,
+        saved_only=LOAD_SAVED_RESULTS_ONLY, job_runner=make_forecast_job_runner(archive), allow_era5t=ALLOW_ERA5T)
+    for _run in field_runs:
+        _run['settings'] = {**_run['settings'], 'catalog':str(CATALOG_PATH),
+            'study_start_utc':STUDY_START_UTC, 'study_end_utc_exclusive':STUDY_END_UTC or None,
+            'run_mode':RUN_MODE, 'selected_events':len(selected), 'lead_hours':list(LEAD_HOURS),
+            'tie_seed':37, 'allow_era5t':ALLOW_ERA5T,
+            'training_cutoff_status':'operational archive training cutoff unverified'}
+    tables, calculation_settings = field_runs[0]['tables'], field_runs[0]['settings']
+    result_directory = field_runs[0]['directory']
     display(tables['batch_status'][['event_number', 'lead_days', 'era5_status', 'wn2_status',
                                     'era5_error', 'wn2_error']])
     ranks = tables['case_ranks']
@@ -197,8 +228,9 @@ cells = [
     print(f'{len(selected)} selected events; {complete_events} complete events contribute to EACH histogram.')
     print(f'{len(selected) - complete_events} events lack at least one required input. Details appear in Batch status.')
     if not ranks.empty:
-        display(ranks[['event_number', 'valid_time_utc', 'polygon', 'lead_days', 'member_count',
-                       'era5_divergence_1e5_s-1', 'era5_rank', 'in_common_sample']])
+        columns = ['event_number', 'field', 'pressure_hpa', 'units', 'valid_time_utc',
+                   'polygon', 'lead_days', 'member_count', 'era5_value', 'era5_rank', 'in_common_sample']
+        display(ranks[[column for column in columns if column in ranks]])
     """),
     cell("markdown", """
     ## 5 · Save and inspect results
@@ -210,10 +242,11 @@ cells = [
     and maximum for each event, polygon, and lead. **Member values** retains each forecast
     value and native member ID. **ERA5 reference** retains the verifying values.
     **Ordered values** is a flat table with all 65 entries per verifiable case, sorted from
-    most negative divergence to most positive divergence. **Ordered bins** presents the same
+    lowest to highest selected-field value. **Ordered bins** presents the same
     numbers in five columns of 13 entries, with ERA5 explicitly labeled and highlighted.
     **Bin counts** gives each polygon/lead's event count in each numbered bin.
-    Values are signed divergence in 10⁻⁵ s⁻¹. Exact rankings use full numerical precision.
+    The default values are signed divergence in 10⁻⁵ s⁻¹; other fields retain their labeled
+    units. Exact rankings use full numerical precision.
     Ties retain the same reproducibly chosen ERA5 position as the graphs.
 
     Both plot versions are exported. **65 ranks** shows all possible positions of ERA5
@@ -226,47 +259,28 @@ cells = [
     cases selected around ERA5-detected JPCZ events.
     """),
     cell("code", """
-    # @title 5 · Save workbook, tables, and six-panel rank histogram
-    import matplotlib.pyplot as plt
+    # @title 5 · Save field reports and collect all saved values into one Excel sheet
+    from IPython.display import Image, display
     RANK_DISPLAY = '65 ranks'  # @param ["65 ranks", "5 groups"]
-
-    tables['event_selection'] = selection_report
-    calculation_settings = {
-        **calculation_settings, 'catalog': str(CATALOG_PATH), 'study_start_utc': STUDY_START_UTC,
-        'study_end_utc_exclusive': STUDY_END_UTC or None, 'run_mode': RUN_MODE,
-        'selected_events': len(selected), 'lead_hours': list(LEAD_HOURS), 'tie_seed': 37,
-        'allow_era5t': ALLOW_ERA5T,
-        'training_cutoff_status': 'operational archive training cutoff unverified',
-        'wn2_data_reference': (
-            'Google LLC WeatherNext 2 historic experimental data (CC BY 4.0). '
-            'https://developers.google.com/earth-engine/datasets/catalog/'
-            'projects_gcp-public-data-weathernext_assets_weathernext_2_0_0'
-        ),
-    }
-    export_verification(tables, calculation_settings, result_directory)
-    print('Saved', result_directory / 'ensemble_verification.xlsx')
-    print('CSV tables and both rank-histogram figures are saved in the same folder.')
-    if not ranks.empty and ranks.in_common_sample.any():
-        for grouped, filename in ((False, 'rank_histograms_65ranks'), (True, 'rank_histograms')):
-            figure = plot_rank_histograms(ranks, grouped=grouped)
-            for extension in ('png', 'pdf'):
-                figure.savefig(result_directory / f'{filename}.{extension}', dpi=180)
-            if grouped == (RANK_DISPLAY == '5 groups'):
-                display(figure)
-            plt.close(figure)
-    else:
-        for stem in ('rank_histograms_65ranks', 'rank_histograms'):
-            for extension in ('png', 'pdf'):
-                (result_directory / f'{stem}.{extension}').unlink(missing_ok=True)
-        print('No complete event for all three leads. Check Batch status, then retry section 4.')
+    export_field_reports(field_runs, selection_report)
+    combined_values, comparison_workbook = consolidate_saved_verification(
+        saved_verification_sources(base_result_directory),
+        OUTPUT_DIR / 'comparison' if RUN_MODE == 'Catalog' else base_result_directory / 'comparison')
+    print('One-sheet comparison:', comparison_workbook)
+    print('Rows collected from saved ordered/member/reference CSVs; no weather fields recalculated.')
+    preview = result_directory / ('rank_histograms_65ranks.png' if RANK_DISPLAY == '65 ranks' else 'rank_histograms.png')
+    if preview.is_file(): display(Image(filename=str(preview)))
+    else: print('No complete common sample yet. Inspect batch_status.csv for missing inputs.')
     """),
     cell("markdown", """
     ## 6 · Reliability diagrams and vortex strata
 
     For each polygon and lead, forecast probability is the fraction of the **64 members**
-    whose instantaneous 925-hPa polygon-mean divergence is **strictly below** the configured
-    threshold. ERA5 supplies a binary crossing/non-crossing at the same valid time.
-    The threshold below is an **editable exploratory snapshot criterion**, in 10⁻⁵ s⁻¹.
+    whose instantaneous polygon-mean value meets the field's configured strict `less` or
+    `greater` criterion. The default is **925-hPa divergence below −2 × 10⁻⁵ s⁻¹**.
+    ERA5 supplies a binary crossing/non-crossing at the same valid time. Section 3a sets
+    each field's threshold in its displayed units; `None` skips its reliability plots.
+    This is an **editable exploratory snapshot criterion**.
     Choose it before evaluating the forecast sample. It is **not** the catalog's hourly
     trailing-D12 threshold, and these probabilities are not probabilities of the complete
     JPCZ detector event or vortex occurrence. Testing a six-hourly approximation to D12
@@ -287,32 +301,16 @@ cells = [
     Changed review labels update the strata without redownloading the forecasts.
     """),
     cell("code", """
-    # @title 6 · Refresh event-conditioned reliability and group rank plots
-    SNAPSHOT_THRESHOLD_1E5 = -2.0  # @param {type:"number"} # Exploratory; choose before analysis.
-    RELIABILITY_THRESHOLDS = {region: SNAPSHOT_THRESHOLD_1E5 for region in POLYGONS}
+    # @title 6 · Refresh reliability and group ranks from saved scalar values
+    SNAPSHOT_THRESHOLD_1E5 = -2.0  # Legacy single-field fallback; VERIFY_FIELDS sets each current field's threshold.
     PROBABILITY_BINS = 10
-    for group in ('All', 'Vortex', 'Non-vortex', 'Unknown'):
-        folder = result_directory / 'event_conditioned' / group.lower().replace('-', '_')
-        probabilities, bins = export_reliability(
-            tables, folder, RELIABILITY_THRESHOLDS, group=group, n_bins=PROBABILITY_BINS)
-        group_ranks = verification_subset(tables, group)
-        n = 0 if group_ranks.empty else group_ranks.loc[group_ranks.in_common_sample, 'review_key'].nunique()
-        print(f'{group}: {n} complete events; results in {folder}')
-        for grouped, stem in ((False, 'rank_histograms_65ranks'), (True, 'rank_histograms')):
-            if n:
-                rank_histogram_counts(group_ranks, grouped=grouped).to_csv(folder / f'{stem}_counts.csv', index=False)
-                figure = plot_rank_histograms(group_ranks, grouped=grouped, title_suffix=group)
-                for extension in ('png', 'pdf'):
-                    figure.savefig(folder / f'{stem}.{extension}', dpi=180)
-                plt.close(figure)
-            else:
-                for extension in ('png', 'pdf', '_counts.csv'):
-                    stale = folder / (f'{stem}{extension}' if extension.startswith('_') else f'{stem}.{extension}')
-                    stale.unlink(missing_ok=True)
-        if group == 'All' and not probabilities.empty:
-            figure = plot_reliability_diagrams(probabilities, n_bins=PROBABILITY_BINS)
-            display(figure)
-            plt.close(figure)
+    _report_runs = globals().get('field_runs', [dict(tables=tables, directory=result_directory,
+        config=dict(threshold=SNAPSHOT_THRESHOLD_1E5, direction='less'), id='divergence_925hpa')])
+    reliability_folders = export_field_reliability(_report_runs, n_bins=PROBABILITY_BINS)
+    from IPython.display import Image, display
+    for _folder in reliability_folders:
+        if _folder.name == 'all' and (_folder/'reliability_diagrams.png').is_file():
+            display(Image(filename=str(_folder/'reliability_diagrams.png')))
     """),
     cell("markdown", """
     ## 7 · Scheduled winter reliability, including non-events
@@ -342,11 +340,16 @@ cells = [
     SCHEDULE_START_UTC = '2026-11-01'  # @param {type:"date"}
     SCHEDULE_END_UTC = '2027-03-01'  # @param {type:"date"} # Exclusive; future times stay pending.
     SCHEDULE_INTERVAL_HOURS = 24  # @param [6, 12, 24] {type:"raw"}
+    # The independent schedule uses the first configured field and its own threshold.
+    _schedule_field = verification_field_configs(VERIFY_FIELDS)[0]
+    _schedule_threshold = _schedule_field['config'].get('threshold')
     scheduled = scheduled_verification_catalog(
         SCHEDULE_START_UTC, SCHEDULE_END_UTC, interval_hours=SCHEDULE_INTERVAL_HOURS)
     print(f'{len(scheduled)} winter targets; {len(scheduled)*len(LEAD_HOURS)} forecast requests.')
     display(scheduled[['event_number', 'target_valid_time']])
     if RUN_SCHEDULED_RELIABILITY:
+        if _schedule_threshold is None:
+            raise ValueError('Choose a reliability threshold for the scheduled field before retrieving data.')
         # Future schedule entries remain visible in the preview, but are not downloaded.
         due = scheduled.loc[scheduled.target_valid_time.le(pd.Timestamp.now(tz='UTC').tz_localize(None))]
         if due.empty:
@@ -354,8 +357,9 @@ cells = [
         open_verification_era5.cache_clear()
         archive.clear()
         scheduled_tables, scheduled_settings = run_ensemble_verification(
-            due, archive, OUTPUT_DIR, allow_era5t=ALLOW_ERA5T)
-        schedule_dir = OUTPUT_DIR / 'scheduled_winter'
+            due, archive, OUTPUT_DIR, allow_era5t=ALLOW_ERA5T, spec=_schedule_field['spec'],
+            job_runner=make_forecast_job_runner(archive))
+        schedule_dir = OUTPUT_DIR / 'scheduled_winter' / _schedule_field['id']
         schedule_dir.mkdir(parents=True, exist_ok=True)
         for name, frame in scheduled_tables.items():
             frame.to_csv(schedule_dir / f'{name}.csv', index=False)
@@ -364,8 +368,9 @@ cells = [
             'due_targets': len(due), 'future_targets': len(scheduled)-len(due), 'allow_era5t': ALLOW_ERA5T}
         atomic_json_file(schedule_dir / 'schedule_settings.json', schedule_settings)
         scheduled_probabilities, scheduled_bins = export_reliability(
-            scheduled_tables, schedule_dir, RELIABILITY_THRESHOLDS,
-            sample='scheduled_winter', n_bins=PROBABILITY_BINS)
+            scheduled_tables, schedule_dir, {region:float(_schedule_threshold) for region in POLYGONS},
+            sample='scheduled_winter', n_bins=PROBABILITY_BINS,
+            direction=_schedule_field['config'].get('direction','less'))
         display(scheduled_tables['batch_status'])
         verified = scheduled_probabilities.review_key.nunique() if not scheduled_probabilities.empty else 0
         print(f'{verified}/{len(due)} due targets verified at all leads; {len(scheduled)-len(due)} future targets.')

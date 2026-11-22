@@ -11,6 +11,7 @@ import hashlib
 import html
 import json
 import re
+import gc
 
 import numpy as np
 import pandas as pd
@@ -67,6 +68,9 @@ class FieldSpec:
 
 
 FIELD_PRESETS = {
+    "u": FieldSpec("u", "eastward wind component", ("u_component_of_wind",), "m s⁻¹", "RdBu_r", (-30, 30), 925, "wind_component"),
+    "v": FieldSpec("v", "northward wind component", ("v_component_of_wind",), "m s⁻¹", "RdBu_r", (-30, 30), 925, "wind_component"),
+    "geopotential": FieldSpec("geopotential", "geopotential", ("geopotential",), "m² s⁻²", "viridis", (45000, 60000), 500, "geopotential"),
     "height": FieldSpec("height", "geopotential height", ("geopotential",), "m", "viridis", (4800, 6000), 500, "height"),
     "winds": FieldSpec("winds", "winds", ("u_component_of_wind", "v_component_of_wind"), "m s⁻¹", "YlGnBu", (0, 30), 925, "wind"),
     "divergence": FieldSpec("divergence", "horizontal divergence (derived)", ("u_component_of_wind", "v_component_of_wind"), "10⁻⁵ s⁻¹", "RdBu_r", (-10, 10), 925, "divergence"),
@@ -277,7 +281,7 @@ def forecast_requests(row):
 
 class GoogleCloudArchive:
     """Metadata-first discovery of WN2 runs, without recursive archive downloads."""
-    def __init__(self, credentials, project_id="", root=ARCHIVE_ROOT, overrides=None, *, lazy_indexing=False):
+    def __init__(self, credentials, project_id="", root=ARCHIVE_ROOT, overrides=None, *, lazy_indexing=False, input_cache_dir=None):
         import gcsfs
         self.root = root.removeprefix("gs://").rstrip("/")
         if self.root != ARCHIVE_ROOT:
@@ -287,6 +291,7 @@ class GoogleCloudArchive:
             self.storage_options["project"] = project_id.strip()
         self.fs = gcsfs.GCSFileSystem(**self.storage_options)
         self.lazy_indexing = lazy_indexing
+        self.input_cache_dir = Path(input_cache_dir) if input_cache_dir else None
         self.overrides = {iso_utc(k): str(v).removeprefix("gs://").rstrip("/") for k, v in (overrides or {}).items()}
         self.listings = {}
         self.datasets = {}
@@ -510,6 +515,23 @@ def diagnostic_domain(ds, domain):
             max(south - 2 * dlat, float(np.min(lat))), min(north + 2 * dlat, float(np.max(lat))))
 
 
+def compact_source_load(dataset):
+    """Decode one selected variable, copy its small arrays, and release its source buffer."""
+    import zarr
+    from numcodecs import blosc
+    blosc.set_nthreads(1)
+    selected = dataset.copy(deep=False)
+    with zarr.config.set({'async.concurrency': 1, 'threading.max_workers': 1}):
+        for name in list(selected.data_vars):
+            loaded = selected[name].load(scheduler='synchronous')
+            selected[name] = xr.DataArray(np.array(loaded.values, copy=True, order='C'),
+                dims=loaded.dims, coords={d:np.array(loaded[d].values, copy=True) for d in loaded.dims},
+                attrs=dict(loaded.attrs))
+            del loaded
+            gc.collect()
+    return selected
+
+
 def derive_field(snap, spec, domain):
     """Dry hydrostatic PV and signed horizontal divergence with spherical metric terms.
 
@@ -521,7 +543,7 @@ def derive_field(snap, spec, domain):
         if unit_kind(snap[name].attrs.get("units", "")) not in expected:
             raise ValueError(f"Unexpected units for derived-field input {name}: {snap[name].attrs.get('units')!r}.")
     # Only regional inputs are retained; original packed source chunks are decoded serially.
-    snap = snap.load(scheduler="synchronous")
+    snap = compact_source_load(snap)
     phi = np.deg2rad(np.asarray(snap.lat.values, dtype=float))
     lam = np.deg2rad(np.asarray(snap.lon.values, dtype=float))
     if len(phi) < 3 or len(lam) < 3 or np.any(np.abs(np.cos(phi)) < 1e-6):
@@ -591,7 +613,8 @@ def convert_field(snap, spec):
     else:
         accepted = {"height": {"geopotential", "height"}, "temperature": {"kelvin", "celsius"},
                     "humidity": {"humidity"}, "pressure": {"pa", "hpa"},
-                    "precipitation": {"height", "millimeters"}, "identity": {"vertical_velocity"}}
+                    "precipitation": {"height", "millimeters"}, "identity": {"vertical_velocity"},
+                    "wind_component": {"wind"}, "geopotential": {"geopotential"}}
         value, kind = field(spec.variables[0], accepted[spec.conversion])
         if spec.conversion == "height" and kind == "geopotential":
             value = value / 9.80665
@@ -622,6 +645,34 @@ def cache_identity(store, init_time, lead, member, spec, domain, diagnostic=None
     return identity
 
 
+def forecast_input_group(archive, store, ds, request, spec, domain, start, end, *, level_stencil=None):
+    """Shared regional source-variable cache; compatible 36/37 reads reuse u/v without decoding again."""
+    selected = select_forecast(ds,request['init_time'],int(request['lead_hours']),None,
+        spec.variables,spec.level,domain,level_stencil=level_stencil).isel(sample=slice(start,end))
+    root=getattr(archive,'input_cache_dir',None)
+    if root is None:return compact_source_load(selected)
+    pieces=[]
+    for name in spec.variables:
+        identity=dict(version=1,store=store,init_time=iso_utc(request['init_time']),lead_hours=int(request['lead_hours']),
+            members=[str(x) for x in selected.sample.values.tolist()],variable=name,
+            member_coordinate_dtype=str(selected.sample.dtype),
+            level_hpa=spec.level,level_stencil=level_stencil,domain=list(domain))
+        encoded=json.dumps(identity,sort_keys=True)
+        path=Path(root)/('input_'+hashlib.sha256(encoded.encode()).hexdigest()[:24]+'.nc')
+        if path.is_file():
+            with xr.open_dataset(path) as saved:
+                if saved.attrs.get('identity')!=encoded:raise ValueError('Regional input cache identity mismatch.')
+                piece=saved.load()
+        else:
+            piece=compact_source_load(selected[[name]]).reset_coords(drop=True)
+            # Do not freeze an unfinished archive chunk into a persistent cache.
+            if np.isfinite(piece[name].values).all():
+                path.parent.mkdir(parents=True,exist_ok=True);piece.attrs={'identity':encoded}
+                temporary=path.with_suffix('.tmp.nc');piece.to_netcdf(temporary);temporary.replace(path)
+        pieces.append(piece)
+    return xr.merge(pieces,combine_attrs='drop')
+
+
 def load_panel(archive, cache_dir, request, member, spec, domain):
     store, ds = archive.run(request["init_time"])
     diagnostic = diagnostic_settings(ds, spec, domain)
@@ -638,11 +689,19 @@ def load_panel(archive, cache_dir, request, member, spec, domain):
     else:
         selection_domain = diagnostic_domain(ds, domain) if diagnostic else domain
         stencil = diagnostic.get("pressure_stencil_hpa") if diagnostic else None
-        snap = select_forecast(ds, request["init_time"], int(request["lead_hours"]), member,
-                               spec.variables, spec.level, selection_domain, level_stencil=stencil)
+        if getattr(archive,'input_cache_dir',None) is not None:
+            labels=ds.sample.values.tolist();position=labels.index(member)
+            start=(position//4)*4;end=min(start+4,len(labels))
+            selection_domain=diagnostic_domain(ds,domain)
+            snap=forecast_input_group(archive,store,ds,request,spec,selection_domain,start,end,level_stencil=stencil).sel(sample=member)
+        else:
+            snap = select_forecast(ds, request["init_time"], int(request["lead_hours"]), member,
+                                   spec.variables, spec.level, selection_domain, level_stencil=stencil)
         # Historical chunks include 4 members and all 13 levels over the globe.
         # Decode chunks serially to limit RAM; only the selected regional slice is retained.
-        result = derive_field(snap, spec, domain) if diagnostic else convert_field(snap, spec).load(scheduler="synchronous")
+        result = derive_field(snap, spec, domain) if diagnostic else convert_field(compact_source_load(snap), spec)
+        if not diagnostic:
+            result=result.sel(lat=slice(domain[2],domain[3]),lon=slice(domain[0],domain[1]))
         if not np.isfinite(result.value.values).any():
             raise ValueError("Selected forecast field has no finite data in this region.")
         result.attrs["identity"] = encoded
@@ -669,8 +728,8 @@ def load_panel(archive, cache_dir, request, member, spec, domain):
 
 
 def event_panels(archive, cache_dir, row, member, specs, domains, progress=print):
-    if len(specs) != 2 or len(domains) != 2:
-        raise ValueError("Choose exactly two plot rows.")
+    if not specs or len(specs) != len(domains):
+        raise ValueError("Choose one or more fields with a domain for each plot row.")
     requests = forecast_requests(row)
     panels = []
     for row_index, (spec, domain) in enumerate(zip(specs, domains)):
@@ -687,12 +746,15 @@ def event_panels(archive, cache_dir, row, member, specs, domains, progress=print
 
 
 def verify_six_panels(panels):
-    if len(panels) != 6:
-        raise ValueError("A complete event needs exactly six panels.")
+    if not panels or len(panels) % 3:
+        raise ValueError("A complete event needs three leads for each field row.")
     for key in ("member", "valid_time", "review_key"):
         if len({p["metadata"][key] for p in panels}) != 1:
             raise ValueError(f"Six-panel group mixes {key} values.")
-    for row in (0, 1):
+    rows = sorted({p['metadata']['row_index'] for p in panels})
+    if rows != list(range(len(panels)//3)):
+        raise ValueError('Plot row indices are not consecutive.')
+    for row in rows:
         group = [p for p in panels if p["metadata"]["row_index"] == row]
         if sorted(p["metadata"]["lead_hours"] for p in group) != list(LEAD_HOURS):
             raise ValueError("Each row must contain exactly the 1-, 5-, and 10-day leads.")
@@ -775,7 +837,9 @@ def render_event(panels, row, features=True):
     import matplotlib.pyplot as plt
     import cartopy.crs as ccrs
     verify_six_panels(panels)
-    fig, axes = plt.subplots(2, 3, figsize=(17, 10.8), subplot_kw={"projection": ccrs.PlateCarree()})
+    rows = len(panels)//3
+    fig, axes = plt.subplots(rows, 3, figsize=(17, 3.9*rows+3), squeeze=False,
+                             subplot_kw={"projection": ccrs.PlateCarree()})
     fig.subplots_adjust(left=.045, right=.91, top=.80, bottom=.12, hspace=.52, wspace=.22)
     for index, panel in enumerate(panels):
         artist = draw_panel(axes.flat[index], panel, features)
@@ -785,6 +849,7 @@ def render_event(panels, row, features=True):
             fig.colorbar(artist, cax=cax, label=colorbar_label(panel["spec"]))
     m = panels[0]["metadata"]
     peak = pd.to_numeric(row.get("event_peak_D_1e5_s-1", np.nan), errors="coerce")
+    peak = float(peak) if pd.notna(peak) else float('nan')
     fig.suptitle(f"WeatherNext 2 | JPCZ event {int(row.event_number)} | Observed event: {vortex_plot_label(row)} | ensemble member {m['member']}\n"
                  f"Catalog start: {utc_naive(row.event_start):%Y-%m-%d %H:%M} UTC  |  "
                  f"end: {utc_naive(row.event_end):%Y-%m-%d %H:%M} UTC\n"
@@ -857,7 +922,7 @@ def export_event(panels, row, output_dir, figure=None, features=True):
         "under CC BY 4.0 licence terms. This data is intended for experimental modelling only and is not intended, validated, "
         "or approved for real world use.\n\nOperational WN2 model training cutoff has not been verified.\n")
     # A complete marker is written only after all seven figure pairs and metadata exist.
-    (destination / "complete.json").write_text(json.dumps({"signature": signature, "forecast_panels": 6, "member": m["member"]}))
+    (destination / "complete.json").write_text(json.dumps({"signature": signature, "forecast_panels": len(panels), "member": m["member"]}))
     return destination
 
 
@@ -1227,7 +1292,42 @@ class WeatherNextBrowser:
         display(self.view)
 
 
-def export_catalog_single_member(browser, limit=None):
+def find_completed_forecast_export(output_dir, row, member, specs, domains, *, overrides=None):
+    """Validate saved files/settings before any archive access or field calculation."""
+    requests=forecast_requests(row).to_dict('records')
+    label=vortex_label_metadata(row)
+    for folder in sorted(Path(output_dir).glob(f'event_{int(row.event_number):04d}_*')):
+        try:
+            marker=json.loads((folder/'complete.json').read_text())
+            records=json.loads((folder/'settings.json').read_text())
+            digest=hashlib.sha256(json.dumps(records,sort_keys=True).encode()).hexdigest()[:12]
+            if marker.get('signature')!=digest or len(records)!=len(specs)*3:continue
+            required=[folder/'overview.png',folder/'overview.pdf',folder/'forecast_metadata.csv',folder/'attribution.txt']
+            matches=True
+            for index,(spec,domain) in enumerate(zip(specs,domains)):
+                group=[item for item in records if item['row_index']==index]
+                if len(group)!=3:matches=False;break
+                for request in requests:
+                    saved=next((item for item in group if item['lead_hours']==request['lead_hours']),{})
+                    expected=dict(review_key=str(row.review_key),member=str(member),field=spec.key,
+                        level_hpa=spec.level,variables=list(spec.variables),conversion=spec.conversion,
+                        units=spec.units,field_title=spec.title,
+                        domain=list(domain),display_min=spec.limits[0],display_max=spec.limits[1],
+                        palette=spec.palette,init_time=iso_utc(request['init_time']),valid_time=iso_utc(request['valid_time']),
+                        event_start=iso_utc(row.event_start),event_end=iso_utc(row.event_end),event_peak=iso_utc(row.event_peak),
+                        plot_style_version=PLOT_STYLE_VERSION,**label)
+                    if overrides and iso_utc(request['init_time']) in overrides:
+                        expected['store']=str(overrides[iso_utc(request['init_time'])]).removeprefix('gs://').rstrip('/')
+                    if spec.key=='divergence':expected['diagnostic']=diagnostic_settings(None,spec,domain)
+                    if any(saved.get(key)!=value for key,value in expected.items()):matches=False;break
+                    stem=f"row{index+1}_{spec.key}_lead{int(request['lead_hours']):03d}h"
+                    required.extend(folder/f'{stem}.{extension}' for extension in ('png','pdf'))
+            if matches and all(path.is_file() and path.stat().st_size for path in required):return folder
+        except (OSError,ValueError,KeyError,TypeError,StopIteration):continue
+    return None
+
+
+def export_catalog_single_member(browser, limit=None, *, fields=None, job_runner=None):
     """Optional explicit batch, using the last successful pilot's member/settings."""
     if browser.loaded is None:
         raise RuntimeError("First load and inspect one complete six-panel event in the browser.")
@@ -1241,18 +1341,47 @@ def export_catalog_single_member(browser, limit=None):
         raise ValueError("Pilot member cannot be resolved unambiguously from WN2 sample labels.")
     member = matches[0]
     specs, domains = [pilot[i]["spec"] for i in (0, 3)], [pilot[i]["domain"] for i in (0, 3)]
+    if fields is not None:
+        if not fields:raise ValueError('Select at least one batch field.')
+        specs=[]
+        for item in fields:
+            base=FIELD_PRESETS[item['field']];level=item.get('level',base.level)
+            if base.key in ('height','geopotential') and level!=base.level and 'limits' not in item:
+                raise ValueError('Choose explicit limits for geopotential/height at a different pressure level.')
+            low,high=map(float,item.get('limits',base.limits))
+            if not np.isfinite([low,high]).all() or low>=high:raise ValueError('Choose finite, increasing plot limits.')
+            if base.key in ('divergence','u','v','ertel_pv') and not low<0<high:
+                raise ValueError('Signed-field scales must straddle zero.')
+            specs.append(replace(base,level=level,limits=(low,high),palette=item.get('palette',base.palette)))
+        domains=[tuple(item.get('domain',DOMAINS['Notebook 35 region (125–145°E, 33–47°N)'])) for item in fields]
     frame = browser.catalog if limit is None else browser.catalog.iloc[:limit]
     browser.output_dir.mkdir(parents=True, exist_ok=True)
-    progress_path = browser.output_dir / "batch_progress.csv"
-    prior = pd.read_csv(progress_path) if progress_path.exists() else pd.DataFrame()
-    records = prior.to_dict("records")
+    settings=dict(member=str(member),fields=[dict(field=s.key,level=s.level,limits=s.limits,palette=s.palette,domain=d)
+                  for s,d in zip(specs,domains)])
+    settings_key=hashlib.sha256(json.dumps(settings,sort_keys=True).encode()).hexdigest()[:16]
+    progress_path = browser.output_dir / f"batch_{settings_key}" / 'batch_progress.csv'
+    progress_path.parent.mkdir(parents=True,exist_ok=True)
+    (progress_path.parent/'settings.json').write_text(json.dumps(settings,indent=2))
+    records = []
     for _, row in frame.iterrows():
         print(f"Event {int(row.event_number)} | fixed member {member}", flush=True)
         result = {"review_key": row.review_key, "event_number": int(row.event_number), "member": str(member)}
         try:
-            panels = event_panels(browser.archive, browser.cache_dir, row, member, specs, domains)
-            destination = export_event(panels, row, browser.output_dir / "figures")
-            result.update(status="complete", output_dir=str(destination), error="")
+            destination=find_completed_forecast_export(browser.output_dir/'figures',row,member,specs,domains,
+                overrides=getattr(browser.archive,'overrides',{}))
+            cached=destination is not None
+            if not cached:
+                if job_runner:
+                    data=job_runner('atlas',dict(row=row.to_dict(),member=member,specs=[s.__dict__ for s in specs],
+                        domains=domains,cache_dir=str(browser.cache_dir),output_dir=str(browser.output_dir/'figures')))
+                    destination=Path(data['output_dir'])
+                else:
+                    panels = event_panels(browser.archive, browser.cache_dir, row, member, specs, domains)
+                    destination = export_event(panels, row, browser.output_dir / "figures")
+                    del panels
+                gc.collect()
+            print('  Reused saved figures; no field reads.' if cached else '  Saved figures and metadata.',flush=True)
+            result.update(status="cached" if cached else "complete", output_dir=str(destination), error="")
         except Exception as error:
             result.update(status="failed", output_dir="", error=f"{type(error).__name__}: {error}")
             print(result["error"], flush=True)
@@ -1261,4 +1390,12 @@ def export_catalog_single_member(browser, limit=None):
         temporary = progress_path.with_suffix(".tmp.csv")
         checkpoint.to_csv(temporary, index=False)
         temporary.replace(progress_path)
+        # Keep the familiar latest-run path, without appending duplicate records on resume.
+        latest=browser.output_dir/'batch_progress.csv';temporary=latest.with_suffix('.tmp.csv')
+        checkpoint.to_csv(temporary,index=False);temporary.replace(latest)
+        # This index is for later Drive-only PDF assembly, never a reason to recalculate fields.
+        index=pd.DataFrame(records)
+        index['overview_pdf']=index.output_dir.map(lambda value:str(Path(value)/'overview.pdf') if value else '')
+        index['overview_png']=index.output_dir.map(lambda value:str(Path(value)/'overview.png') if value else '')
+        index.to_csv(progress_path.parent/'figure_index.csv',index=False)
     return pd.DataFrame(records)
