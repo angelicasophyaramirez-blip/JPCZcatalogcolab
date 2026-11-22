@@ -89,3 +89,8 @@ Design rule:
 
 For the correct detector version, first-run inspection, November 19 example,
 and the refresh sequence, see [winter catalog updates](../docs/winter-catalog-updates.md).
+
+Notebook 35's final batch now defaults to all remaining current events at
+−12 h, peak, and +12 h, with the browser's Auto Terra-to-Aqua satellite fallback.
+Each event gets a three-page PDF plus per-phase PNG/PDF/CSV files in one resumable
+Drive atlas. See [the batch export guide](../docs/notebook35-batch.md).
