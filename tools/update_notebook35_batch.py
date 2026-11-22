@@ -2,6 +2,8 @@
 import ast
 import json
 from pathlib import Path
+import subprocess
+import sys
 import textwrap
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,3 +100,6 @@ for item in notebook['cells']:
     item['source'] = source.splitlines(keepends=True)
 TARGET.write_text(json.dumps(notebook, indent=1, ensure_ascii=False) + '\n')
 print(TARGET)
+memory_updater = ROOT / 'tools/update_notebook35_memory.py'
+if memory_updater.exists():
+    subprocess.run([sys.executable, str(memory_updater)], check=True)

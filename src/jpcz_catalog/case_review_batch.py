@@ -75,7 +75,7 @@ def batch_combine_event_pdf(paths, destination):
 
 
 def run_case_review_batch(frame, output_dir, *, load_case, render_cases, label_for,
-                          refresh_event=None, hours=1, limit=None, offsets=(-12, 0, 12),
+                          refresh_event=None, release_memory=None, hours=1, limit=None, offsets=(-12, 0, 12),
                           satellite_platform='Auto', satellite_day_offset=0,
                           accumulation_mode='event_start', settings=None, dpi=180, progress=print):
     """Export every selected event at all phases; retry only incomplete or changed products.
@@ -208,13 +208,13 @@ def run_case_review_batch(frame, output_dir, *, load_case, render_cases, label_f
                         temporary.replace(destination)
                 finally:
                     plt.close(figure)
-                    case, dynamics = None, None
+                    figure, case, dynamics = None, None, None
                 metadata['batch_status'] = status
                 batch_atomic_csv(pd.DataFrame([metadata]), files['metadata_csv'])
                 record = batch_json_value(dict(**metadata, status=status,
                     **{name: str(path) for name, path in files.items()}))
                 batch_atomic_json(dict(request=identity, record=record), state_path)
-                gc.collect()
+                (release_memory or gc.collect)()
             event_jobs.append(record)
             jobs.append(record)
             # Update after each phase, including a partial/failed phase, so a disconnect loses little.
@@ -230,6 +230,7 @@ def run_case_review_batch(frame, output_dir, *, load_case, render_cases, label_f
                 job['event_pdf'] = str(event_pdf)
                 job['event_metadata_csv'] = str(event_dir / 'all_three_times_metadata.csv')
             batch_atomic_csv(pd.DataFrame(event_jobs), event_dir / 'all_three_times_metadata.csv')
+            (release_memory or gc.collect)()
     result = pd.DataFrame(jobs)
     batch_atomic_csv(result, root / 'batch_manifest.csv')
     batch_atomic_csv(result, root / 'all_cases_metadata.csv')

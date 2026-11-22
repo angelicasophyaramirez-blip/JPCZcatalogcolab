@@ -74,6 +74,22 @@ Batch figures are saved rather than accumulating hundreds of large inline
 outputs. The three-page PDF is assembled one event at a time. There is no single
 PDF containing every event, avoiding an unnecessarily large file and merge.
 
+ERA5 source decoding is also bounded: maps and vortex checks now read one hour
+and one variable at a time, with one Zarr read worker and one Blosc codec thread.
+The selected 925-hPa regional arrays are copied into compact owned buffers so
+they cannot retain the full decoded globe/all-pressure-level chunks. A 12-hour
+map keeps only 12 small regional snapshots for the original mean calculation.
+An uncached 25-hour vortex screen saves and releases each hour separately.
+The screen criteria, divergence calculation, output settings, cache filenames,
+and batch completion identities are unchanged by this I/O fix.
+
+After each phase, references to the closed figure are released and garbage is
+collected. On Linux/Colab the cleanup also asks the allocator to return free
+pages to the operating system when `malloc_trim` is available. After a RAM
+crash, reconnect the runtime, run setup and NASA login, and rerun the batch
+using the same settings and Drive root. Successful phase exports and compact
+vortex-hour caches remain on Drive and are reused.
+
 If weather data cannot be loaded, the affected phase receives a labeled error
 page and a failed metadata record; later events continue. Transient precipitation
 or imagery gaps are partial and retried on the next pass. Satellite dates before
@@ -90,7 +106,8 @@ parent review folder do not count as completed three-time exports.
 The reusable exporter lives in `src/jpcz_catalog/case_review_batch.py` and is
 embedded as ordinary multiline source by `tools/update_notebook35_batch.py`.
 After rebuilding Notebook 35, apply its existing vortex-label updater and then
-this batch updater. The updater is idempotent.
+this batch updater. It also invokes `tools/update_notebook35_memory.py` to embed
+`src/jpcz_catalog/case_review_memory.py`. Both updaters are idempotent.
 
 Tests cover real three-page PDF output, all-event iteration, exact offsets,
 real browser Auto selection with synthetic Terra failure/Aqua success, bounded
@@ -98,3 +115,12 @@ pilot resume, deleted PDFs, failed phase placeholders, transient-data retries,
 permanent pre-MODIS gaps, the embedded wrapper, and the actual six-panel renderer
 without inline figure accumulation. Source fields are synthetic for offline
 checks; private NASA downloads still require the user's authenticated Colab run.
+
+Memory regressions verify that each source load is a single time, level, and
+variable; that retained arrays own only compact regional memory; that the map
+divergence values and existing map caches are unchanged; and that a vortex
+screen interrupted after six hours resumes only its 19 missing snapshots.
+A cold read of the public ERA5 fields at 2001-12-21 06 UTC, where the reported
+batch crash occurred, completed in a local test process with about 773 MiB peak
+RSS and 55,956 bytes of retained regional data. This is a reader measurement,
+not a peak-RAM guarantee for the full Colab batch.

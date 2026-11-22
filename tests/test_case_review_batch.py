@@ -247,6 +247,7 @@ def test_embedded_batch_wrapper_calls_the_same_three_phase_exporter(tmp_path):
     api, reads, _, _ = batch_api()
     namespace = dict(module.__dict__)
     namespace.update(OUTPUT_DIR=tmp_path, get_case=api['load_case'],
+        release_review_memory=lambda: None,
         plot_cases=lambda items, show: api['render_cases'](items), vortex_plot_label=api['label_for'],
         attach_vortex_flags=lambda frame: frame.copy(), DOMAIN=(125,145,33,47), POLYGONS={},
         ERA5_STORE='test-era5', IMERG_PRODUCT='test-imerg', IMERG_VERSION='07',
