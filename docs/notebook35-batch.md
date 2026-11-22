@@ -5,6 +5,16 @@ The installation cell now includes `pypdf`, used to combine one event's three
 pages without holding the entire atlas in memory. The helper cell is collapsed
 under “Load case-review helpers.”
 
+The NASA authentication cell must run again in every new Colab runtime, even
+when Drive still contains cached data. Wait for “NASA Earthdata authenticated.”
+The batch checks the login before reading any weather data, and before each
+new phase. Missing login stops with instructions rather than producing hundreds
+of incomplete precipitation panels. Individual map requests also check login
+when uncached IMERG intervals need downloading. Login failures propagate through
+the case reader and stop the batch; completed phase files remain untouched.
+Sign in and rerun with the same settings to reuse complete phases and retry
+partial phases from an earlier unauthenticated run. Credentials are not saved.
+
 In the final batch cell, set:
 
 ```python

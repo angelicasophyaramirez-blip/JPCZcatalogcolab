@@ -14,7 +14,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
-from jpcz_catalog.case_review_batch import run_case_review_batch
+from jpcz_catalog.case_review_batch import (
+    EarthdataLoginRequired, require_earthdata_auth, run_case_review_batch,
+)
 
 
 def cases(count=2):
@@ -247,6 +249,7 @@ def test_embedded_batch_wrapper_calls_the_same_three_phase_exporter(tmp_path):
     api, reads, _, _ = batch_api()
     namespace = dict(module.__dict__)
     namespace.update(OUTPUT_DIR=tmp_path, get_case=api['load_case'],
+        auth=type('Auth', (), {'authenticated': True})(),
         release_review_memory=lambda: None,
         plot_cases=lambda items, show: api['render_cases'](items), vortex_plot_label=api['label_for'],
         attach_vortex_flags=lambda frame: frame.copy(), DOMAIN=(125,145,33,47), POLYGONS={},
@@ -256,3 +259,59 @@ def test_embedded_batch_wrapper_calls_the_same_three_phase_exporter(tmp_path):
     result = namespace['run_batch'](cases(1))
     assert len(result) == 3 and result.status.eq('complete').all()
     assert [args['offset'] for _, args in reads] == [-12, 0, 12]
+
+
+@pytest.mark.parametrize('auth', [None, object(), type('Auth', (), {'authenticated': False})()])
+def test_missing_login_stops_before_reads_or_checkpoint_changes(tmp_path, auth):
+    api, reads, _, renders = batch_api()
+    with pytest.raises(EarthdataLoginRequired, match='NASA authentication'):
+        run_case_review_batch(cases(), tmp_path, check_auth=lambda: require_earthdata_auth(auth), **api)
+    assert not reads and not renders
+    assert not list(tmp_path.iterdir())
+
+
+def test_login_failure_mid_batch_preserves_exports_and_resumes_remaining_phases(tmp_path):
+    api, reads, _, _ = batch_api()
+    real_load = api['load_case']
+    def loses_login(row, **kwargs):
+        if kwargs['offset'] == 0:
+            require_earthdata_auth(None)
+        return real_load(row, **kwargs)
+    api['load_case'] = loses_login
+    with pytest.raises(EarthdataLoginRequired):
+        run_case_review_batch(cases(1), tmp_path, progress=lambda _: None, **api)
+    root = next((tmp_path / 'batch_evolution').iterdir())
+    manifest = pd.read_csv(root / 'batch_manifest.csv')
+    assert manifest.offset_hours.tolist() == [-12]
+    assert manifest.status.tolist() == ['complete']
+    saved_png = Path(manifest.png.iloc[0])
+    before = saved_png.stat().st_mtime_ns
+    assert not list(root.glob('event_*/peak.pdf'))
+    assert json.loads((root / 'batch_summary.json').read_text())['run_status'] == 'paused_authentication'
+    api['load_case'] = real_load
+    reads.clear()
+    result = run_case_review_batch(cases(1), tmp_path, progress=lambda _: None, **api)
+    assert [kwargs['offset'] for _, kwargs in reads] == [0, 12]
+    assert result.status.eq('complete').all()
+    assert saved_png.stat().st_mtime_ns == before
+
+
+@pytest.mark.parametrize('failed_request', ['rate', 'running_total'])
+def test_actual_case_reader_propagates_login_failures(failed_request):
+    notebook = json.loads((ROOT / 'notebooks/35_imerg_manual_case_review.ipynb').read_text())
+    source = next(''.join(c['source']) for c in notebook['cells'] if 'def get_case(' in ''.join(c['source']))
+    node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == 'get_case')
+    row = cases(1).iloc[0]
+    def fail_login(*args):
+        require_earthdata_auth(None)
+    namespace = dict(np=np, pd=pd, re=__import__('re'), DATE_COLUMNS=('event_start', 'event_end', 'event_peak'),
+        VORTEX_LABEL_SCHEME='test', POLYGONS={},
+        accumulation_bounds=lambda *args: (row.event_start, row.event_end),
+        load_era5=lambda *args: None,
+        load_imerg=fail_login if failed_request == 'rate' else lambda *args: (None, None, {'imerg_status':'complete'}),
+        load_imerg_interval=fail_login,
+        window_bounds=lambda hour, hours: (hour, hour + pd.Timedelta(hours=hours)),
+        vortex_case_metadata=lambda *args: {}, vortex_plot_label=lambda *args: 'test')
+    exec(compile(ast.Module(body=[node], type_ignores=[]), 'notebook35_get_case', 'exec'), namespace)
+    with pytest.raises(EarthdataLoginRequired):
+        namespace['get_case'](row)

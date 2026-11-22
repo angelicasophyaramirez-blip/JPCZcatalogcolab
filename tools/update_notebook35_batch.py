@@ -1,6 +1,7 @@
 """Install the resumable all-event, three-time atlas into standalone Notebook 35."""
 import ast
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -15,6 +16,7 @@ wrapper = '''def run_batch(frame, hours=1, limit=None, offsets=(-12, 0, 12), sat
               satellite_day_offset=0, accumulation_mode='event_start'):
     return run_case_review_batch(
         frame, OUTPUT_DIR, load_case=get_case,
+        check_auth=lambda: require_earthdata_auth(globals().get('auth')),
         render_cases=lambda cases: plot_cases(cases, show=False), label_for=vortex_plot_label,
         refresh_event=lambda row: attach_vortex_flags(pd.DataFrame([row])).iloc[0],
         hours=hours, limit=limit, offsets=offsets, satellite_platform=satellite_platform,
@@ -31,6 +33,25 @@ for item in notebook['cells']:
         node = next(node for node in ast.parse(source).body
                     if isinstance(node, ast.FunctionDef) and node.name == 'run_batch')
         source = source.replace(ast.get_source_segment(source, node), wrapper, 1)
+        # Protect individual browser requests too, but allow fully cached IMERG reads offline.
+        loader = next(node for node in ast.parse(source).body
+                      if isinstance(node, ast.FunctionDef) and node.name == 'load_imerg_interval')
+        old_loader = ast.get_source_segment(source, loader)
+        guarded_loader = old_loader.replace(
+            "    if missing:\n        print(f'IMERG:",
+            "    if missing:\n        require_earthdata_auth(globals().get('auth'))\n        print(f'IMERG:", 1)
+        source = source.replace(old_loader, guarded_loader, 1)
+        case_node = next(node for node in ast.parse(source).body
+                         if isinstance(node, ast.FunctionDef) and node.name == 'get_case')
+        old_case = ast.get_source_segment(source, case_node)
+        guarded_case = old_case
+        for indent in ('    ', '            '):
+            anchor = indent + 'except Exception as error:\n'
+            check = indent + "    if getattr(error, 'requires_earthdata_login', False):\n" + indent + '        raise\n'
+            # Idempotent: never swallow a session failure as an ordinary data gap.
+            guarded_case = re.sub('^' + re.escape(anchor + check), anchor, guarded_case, flags=re.M)
+            guarded_case = re.sub('^' + re.escape(anchor), anchor + check, guarded_case, flags=re.M)
+        source = source.replace(old_case, guarded_case, 1)
         source = source.replace('def plot_cases(cases, stem=None):',
                                 'def plot_cases(cases, stem=None, *, show=True):')
         source = source.replace('\n    plt.show()\n    return fig', '\n    if show:\n        plt.show()\n    return fig')
@@ -63,13 +84,17 @@ for item in notebook['cells']:
         else:
             print('Batch is off. Set RUN_BATCH = True to export all cases at −12 h, peak, and +12 h.')
         ''').strip() + '\n'
-    elif item['cell_type'] == 'markdown' and source.startswith('## Optional resumable atlas'):
+    elif item['cell_type'] == 'markdown' and source.startswith(('## Optional resumable atlas', '## Resumable batch:')):
         source = textwrap.dedent('''
         ## Resumable batch: every event at −12 h, peak, and +12 h
 
         Set **RUN_BATCH = True** below. The default **EVENTS_PER_RUN = None** processes all
         remaining current catalog events. A pilot limit of 1 processes all three times for
         one event. Times are relative to each event's peak; the browser slider does not set them.
+
+        Run the **NASA authentication** cell in every new runtime first, and wait for its
+        authenticated message. Missing login stops the batch before data reads; sign in and
+        rerun with the same settings to reuse completed exports and retry partial phases.
 
         **Auto satellite selection matches the browser:** try Terra, then Aqua on the same
         requested date if Terra imagery is unavailable/blank. Titles and CSVs identify the

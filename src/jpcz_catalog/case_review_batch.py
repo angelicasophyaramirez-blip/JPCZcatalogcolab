@@ -11,6 +11,21 @@ BATCH_EXPORT_VERSION = 1
 BATCH_DATE_COLUMNS = ('event_start', 'event_end', 'event_peak')
 
 
+class EarthdataLoginRequired(RuntimeError):
+    """A session problem must stop the batch, rather than produce missing-data pages."""
+    requires_earthdata_login = True
+
+
+def require_earthdata_auth(auth):
+    """Check the Auth returned by the notebook's explicit, non-persistent login cell."""
+    if not getattr(auth, 'authenticated', False):
+        raise EarthdataLoginRequired(
+            'NASA Earthdata login is missing in this runtime. Run the cell under '
+            '"NASA authentication for new IMERG map requests" and wait for '
+            '"NASA Earthdata authenticated", then rerun the batch with the same settings. '
+            'Completed exports and cached data will be reused; partial phases will retry.')
+
+
 def batch_json_value(value):
     if isinstance(value, dict):
         return {str(k): batch_json_value(v) for k, v in value.items()}
@@ -75,7 +90,8 @@ def batch_combine_event_pdf(paths, destination):
 
 
 def run_case_review_batch(frame, output_dir, *, load_case, render_cases, label_for,
-                          refresh_event=None, release_memory=None, hours=1, limit=None, offsets=(-12, 0, 12),
+                          refresh_event=None, release_memory=None, check_auth=None,
+                          hours=1, limit=None, offsets=(-12, 0, 12),
                           satellite_platform='Auto', satellite_day_offset=0,
                           accumulation_mode='event_start', settings=None, dpi=180, progress=print):
     """Export every selected event at all phases; retry only incomplete or changed products.
@@ -101,6 +117,9 @@ def run_case_review_batch(frame, output_dir, *, load_case, render_cases, label_f
         raise ValueError('Load the current Notebook 35 catalog before running batch.')
     if frame.review_key.duplicated().any():
         raise ValueError('Duplicate event identities in batch inventory.')
+    # Before source reads or checkpoint changes, fail clearly if the login cell was skipped.
+    if check_auth:
+        check_auth()
     config = dict(export_version=BATCH_EXPORT_VERSION, hours=hours, offsets=list(offsets),
                   satellite_platform=satellite_platform, satellite_day_offset=satellite_day_offset,
                   accumulation_mode=accumulation_mode, dpi=dpi, reader_settings=settings or {})
@@ -164,6 +183,8 @@ def run_case_review_batch(frame, output_dir, *, load_case, render_cases, label_f
                 figure, case, dynamics = None, None, None
                 figures_before = set(plt.get_fignums())
                 try:
+                    if check_auth:
+                        check_auth()
                     case = load_case(row, hours=hours, offset=offset,
                                      satellite_platform=satellite_platform, satellite_day_offset=satellite_day_offset,
                                      accumulation_mode=accumulation_mode)
@@ -189,6 +210,14 @@ def run_case_review_batch(frame, output_dir, *, load_case, render_cases, label_f
                     for figure_id in set(plt.get_fignums()) - figures_before:
                         plt.close(figure_id)
                     case, dynamics = None, None
+                    if getattr(error, 'requires_earthdata_login', False):
+                        batch_atomic_json(dict(run_status='paused_authentication',
+                            selected_events=len(frame), attempted_events=attempted_events,
+                            requested_phases=len(frame)*3, saved_phases=len(jobs),
+                            interrupted_event=int(row.event_number), interrupted_offset_hours=offset,
+                            error=str(error)), root / 'batch_summary.json')
+                        (release_memory or gc.collect)()
+                        raise
                     status = 'failed'
                     metadata['error'] = f'{type(error).__name__}: {error}'
                     progress('  ' + metadata['error'])
