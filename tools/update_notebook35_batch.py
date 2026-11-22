@@ -17,6 +17,7 @@ wrapper = '''def run_batch(frame, hours=1, limit=None, offsets=(-12, 0, 12), sat
     return run_case_review_batch(
         frame, OUTPUT_DIR, load_case=get_case,
         check_auth=lambda: require_earthdata_auth(globals().get('auth')),
+        export_phase=make_review_phase_exporter(globals()),
         render_cases=lambda cases: plot_cases(cases, show=False), label_for=vortex_plot_label,
         refresh_event=lambda row: attach_vortex_flags(pd.DataFrame([row])).iloc[0],
         hours=hours, limit=limit, offsets=offsets, satellite_platform=satellite_platform,
@@ -47,8 +48,10 @@ for item in notebook['cells']:
         guarded_case = old_case
         for indent in ('    ', '            '):
             anchor = indent + 'except Exception as error:\n'
-            check = indent + "    if getattr(error, 'requires_earthdata_login', False):\n" + indent + '        raise\n'
+            old_check = indent + "    if getattr(error, 'requires_earthdata_login', False):\n" + indent + '        raise\n'
+            check = indent + "    if isinstance(error, MemoryError) or getattr(error, 'requires_earthdata_login', False):\n" + indent + '        raise\n'
             # Idempotent: never swallow a session failure as an ordinary data gap.
+            guarded_case = re.sub('^' + re.escape(anchor + old_check), anchor, guarded_case, flags=re.M)
             guarded_case = re.sub('^' + re.escape(anchor + check), anchor, guarded_case, flags=re.M)
             guarded_case = re.sub('^' + re.escape(anchor), anchor + check, guarded_case, flags=re.M)
         source = source.replace(old_case, guarded_case, 1)
@@ -117,7 +120,10 @@ for item in notebook['cells']:
         continues to later events. Progress is saved after every phase. A disconnect can be
         resumed by running setup and this cell with the same settings and Drive folder.
         Underlying ERA5, IMERG, satellite, and vortex caches are reused. One figure is rendered
-        at a time and closed; hundreds of figures are not retained in notebook output or RAM.
+        at a time in a fresh Python process. That process exits after saving its PNG/PDF,
+        releasing reader and plotting memory before the next phase. The notebook keeps only
+        metadata and checkpoints. A worker failure pauses the batch without marking the phase
+        complete; cached inputs and completed exports remain reusable.
         CSVs and figures describe the catalog, without changing it or its saved reviews.
         ''').strip() + '\n'
     if item['cell_type'] == 'code':
@@ -128,3 +134,4 @@ print(TARGET)
 memory_updater = ROOT / 'tools/update_notebook35_memory.py'
 if memory_updater.exists():
     subprocess.run([sys.executable, str(memory_updater)], check=True)
+subprocess.run([sys.executable, str(ROOT / 'tools/update_notebook35_isolation.py')], check=True)

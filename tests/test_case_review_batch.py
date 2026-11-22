@@ -250,6 +250,8 @@ def test_embedded_batch_wrapper_calls_the_same_three_phase_exporter(tmp_path):
     namespace = dict(module.__dict__)
     namespace.update(OUTPUT_DIR=tmp_path, get_case=api['load_case'],
         auth=type('Auth', (), {'authenticated': True})(),
+        make_review_phase_exporter=lambda ns: lambda row, files, **options: module.batch_export_phase(
+            row, files, load_case=api['load_case'], render_cases=api['render_cases'], **options),
         release_review_memory=lambda: None,
         plot_cases=lambda items, show: api['render_cases'](items), vortex_plot_label=api['label_for'],
         attach_vortex_flags=lambda frame: frame.copy(), DOMAIN=(125,145,33,47), POLYGONS={},
@@ -297,12 +299,15 @@ def test_login_failure_mid_batch_preserves_exports_and_resumes_remaining_phases(
 
 
 @pytest.mark.parametrize('failed_request', ['rate', 'running_total'])
-def test_actual_case_reader_propagates_login_failures(failed_request):
+@pytest.mark.parametrize('error_type', [EarthdataLoginRequired, MemoryError])
+def test_actual_case_reader_propagates_login_and_memory_failures(failed_request, error_type):
     notebook = json.loads((ROOT / 'notebooks/35_imerg_manual_case_review.ipynb').read_text())
     source = next(''.join(c['source']) for c in notebook['cells'] if 'def get_case(' in ''.join(c['source']))
     node = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == 'get_case')
     row = cases(1).iloc[0]
     def fail_login(*args):
+        if error_type is MemoryError:
+            raise MemoryError('synthetic allocation failure')
         require_earthdata_auth(None)
     namespace = dict(np=np, pd=pd, re=__import__('re'), DATE_COLUMNS=('event_start', 'event_end', 'event_peak'),
         VORTEX_LABEL_SCHEME='test', POLYGONS={},
@@ -313,5 +318,5 @@ def test_actual_case_reader_propagates_login_failures(failed_request):
         window_bounds=lambda hour, hours: (hour, hour + pd.Timedelta(hours=hours)),
         vortex_case_metadata=lambda *args: {}, vortex_plot_label=lambda *args: 'test')
     exec(compile(ast.Module(body=[node], type_ignores=[]), 'notebook35_get_case', 'exec'), namespace)
-    with pytest.raises(EarthdataLoginRequired):
+    with pytest.raises(error_type):
         namespace['get_case'](row)

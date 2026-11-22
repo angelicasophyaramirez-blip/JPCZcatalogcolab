@@ -89,8 +89,58 @@ def batch_combine_event_pdf(paths, destination):
         temporary.unlink(missing_ok=True)
 
 
+def batch_export_phase(row, files, *, metadata, load_case, render_cases, hours, offset,
+                       satellite_platform, satellite_day_offset, accumulation_mode, dpi, progress=print):
+    """Use the same reader/renderer for an in-process or isolated phase export."""
+    import matplotlib.pyplot as plt
+    figure = None
+    figures_before = set(plt.get_fignums())
+    try:
+        try:
+            case = load_case(row, hours=hours, offset=offset,
+                satellite_platform=satellite_platform, satellite_day_offset=satellite_day_offset,
+                accumulation_mode=accumulation_mode)
+            metadata.update(case['metadata'])
+            dynamics = case.get('dynamics')
+            if dynamics is not None:
+                names = ('divergence', 'vorticity', 'u', 'v', 'mslp')
+                missing = [name for name in names if name not in dynamics
+                           or not np.isfinite(dynamics[name].values).any()]
+                if missing:
+                    raise ValueError('ERA5 maps unavailable for: ' + ', '.join(missing))
+                metadata['era5_map_status'] = ('complete' if all(
+                    np.isfinite(dynamics[name].values).all() for name in names) else 'partial')
+            figure = render_cases([case])
+            status = batch_data_status(metadata)
+        except Exception as error:
+            if isinstance(error, MemoryError) or getattr(error, 'requires_earthdata_login', False):
+                raise
+            for figure_id in set(plt.get_fignums()) - figures_before:
+                plt.close(figure_id)
+            status = 'failed'
+            metadata['error'] = f'{type(error).__name__}: {error}'
+            progress('  ' + metadata['error'])
+            figure = plt.figure(figsize=(18, 10.5), layout='constrained')
+            axis = figure.add_subplot()
+            axis.axis('off')
+            axis.text(.5, .65, f'Event {int(row.event_number)} · {offset:+d} h from peak\n'
+                      f"{metadata['view_hour_utc']} UTC", ha='center', va='center', fontsize=18,
+                      transform=axis.transAxes)
+            axis.text(.5, .4, 'Case data unavailable; this phase will be retried.\n' + metadata['error'],
+                      ha='center', va='center', wrap=True, fontsize=12, transform=axis.transAxes)
+        for extension in ('png', 'pdf'):
+            destination = Path(files[extension])
+            temporary = destination.with_name('.' + destination.stem + '.tmp.' + extension)
+            figure.savefig(temporary, format=extension, dpi=dpi, bbox_inches='tight')
+            temporary.replace(destination)
+        return metadata, status
+    finally:
+        for figure_id in set(plt.get_fignums()) - figures_before:
+            plt.close(figure_id)
+
+
 def run_case_review_batch(frame, output_dir, *, load_case, render_cases, label_for,
-                          refresh_event=None, release_memory=None, check_auth=None,
+                          refresh_event=None, release_memory=None, check_auth=None, export_phase=None,
                           hours=1, limit=None, offsets=(-12, 0, 12),
                           satellite_platform='Auto', satellite_day_offset=0,
                           accumulation_mode='event_start', settings=None, dpi=180, progress=print):
@@ -180,64 +230,31 @@ def run_case_review_batch(frame, output_dir, *, load_case, render_cases, label_f
                                 satellite_day_offset=satellite_day_offset,
                                 catalog_provisional=row.get('catalog_provisional', False),
                                 satellite_requested_platform=satellite_platform)
-                figure, case, dynamics = None, None, None
-                figures_before = set(plt.get_fignums())
                 try:
                     if check_auth:
                         check_auth()
-                    case = load_case(row, hours=hours, offset=offset,
-                                     satellite_platform=satellite_platform, satellite_day_offset=satellite_day_offset,
-                                     accumulation_mode=accumulation_mode)
-                    metadata.update(case['metadata'])
-                    dynamics = case.get('dynamics')
-                    if dynamics is not None:
-                        names = ('divergence', 'vorticity', 'u', 'v', 'mslp')
-                        missing_fields = [name for name in names if name not in dynamics
-                                          or not np.isfinite(dynamics[name].values).any()]
-                        if missing_fields:
-                            raise ValueError('ERA5 maps unavailable for: ' + ', '.join(missing_fields))
-                        metadata['era5_map_status'] = ('complete' if all(
-                            np.isfinite(dynamics[name].values).all() for name in names) else 'partial')
-                    # A first case read can complete the event's previously unchecked vortex screen.
-                    for name in ('vortex_detected', 'vortex_scan_status', 'vortex_screen_signature'):
-                        if name in metadata:
-                            row[name] = metadata[name]
-                    identity = request_identity()
-                    figure = render_cases([case])
-                    status = batch_data_status(metadata)
-                    case = None
+                    options = dict(metadata=metadata, hours=hours, offset=offset,
+                        satellite_platform=satellite_platform, satellite_day_offset=satellite_day_offset,
+                        accumulation_mode=accumulation_mode, dpi=dpi)
+                    if export_phase:
+                        metadata, status = export_phase(row, files, **options)
+                    else:
+                        metadata, status = batch_export_phase(row, files, load_case=load_case,
+                            render_cases=render_cases, progress=progress, **options)
                 except Exception as error:
-                    for figure_id in set(plt.get_fignums()) - figures_before:
-                        plt.close(figure_id)
-                    case, dynamics = None, None
-                    if getattr(error, 'requires_earthdata_login', False):
-                        batch_atomic_json(dict(run_status='paused_authentication',
-                            selected_events=len(frame), attempted_events=attempted_events,
-                            requested_phases=len(frame)*3, saved_phases=len(jobs),
-                            interrupted_event=int(row.event_number), interrupted_offset_hours=offset,
-                            error=str(error)), root / 'batch_summary.json')
-                        (release_memory or gc.collect)()
-                        raise
-                    status = 'failed'
-                    metadata['error'] = f'{type(error).__name__}: {error}'
-                    progress('  ' + metadata['error'])
-                    # Preserve the phase in the PDF even when its weather data are unavailable.
-                    figure = plt.figure(figsize=(18, 10.5), layout='constrained')
-                    axis = figure.add_subplot()
-                    axis.axis('off')
-                    axis.text(.5, .65, f'Event {int(row.event_number)} · {offset:+d} h from peak\n{hour} UTC',
-                              ha='center', va='center', fontsize=18, transform=axis.transAxes)
-                    axis.text(.5, .4, 'Case data unavailable; this phase will be retried.\n' + metadata['error'],
-                              ha='center', va='center', wrap=True, fontsize=12, transform=axis.transAxes)
-                try:
-                    for extension in ('png', 'pdf'):
-                        destination = files[extension]
-                        temporary = destination.with_name('.' + phase + '.tmp.' + extension)
-                        figure.savefig(temporary, format=extension, dpi=dpi, bbox_inches='tight')
-                        temporary.replace(destination)
-                finally:
-                    plt.close(figure)
-                    figure, case, dynamics = None, None, None
+                    authentication = getattr(error, 'requires_earthdata_login', False)
+                    batch_atomic_json(dict(run_status='paused_authentication' if authentication else 'paused_worker',
+                        selected_events=len(frame), attempted_events=attempted_events,
+                        requested_phases=len(frame)*3, saved_phases=len(jobs),
+                        interrupted_event=int(row.event_number), interrupted_offset_hours=offset,
+                        error=str(error)), root / 'batch_summary.json')
+                    (release_memory or gc.collect)()
+                    raise
+                # A first case read can finish the event's previously unchecked vortex screen.
+                for name in ('vortex_detected', 'vortex_scan_status', 'vortex_screen_signature'):
+                    if name in metadata:
+                        row[name] = metadata[name]
+                identity = request_identity()
                 metadata['batch_status'] = status
                 batch_atomic_csv(pd.DataFrame([metadata]), files['metadata_csv'])
                 record = batch_json_value(dict(**metadata, status=status,

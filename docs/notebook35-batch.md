@@ -84,6 +84,31 @@ Batch figures are saved rather than accumulating hundreds of large inline
 outputs. The three-page PDF is assembled one event at a time. There is no single
 PDF containing every event, avoiding an unnecessarily large file and merge.
 
+Each batch phase now runs in a **fresh Python interpreter**. The child uses the
+same case reader, satellite Auto fallback, renderer, numerical definitions,
+and Drive caches as the browser. It writes the PNG/PDF, returns only metadata,
+then exits. This releases all of its decoder, HTTP, native allocator, and plot
+memory between phases, including buffers that garbage collection cannot reclaim
+in a long-lived notebook. The notebook process assembles event PDFs and persists
+checkpoints. The batch folder hash and completion identities are unchanged, so
+exports saved before this fix are reused. The interactive browser remains in
+the notebook process.
+
+On Colab/Linux the child also limits its address space to 6 GiB and uses one
+numerical-library thread. A child exit, timeout, or uncaught memory allocation
+failure pauses the batch with `paused_worker`; it does not create a successful
+checkpoint for that phase. Interrupting the notebook also terminates its child.
+Normal weather-data gaps still receive the existing partial/failed metadata.
+Worker PID and peak resident memory are recorded in new phase metadata for
+diagnosis. The parent never receives weather arrays or figure objects.
+
+The worker reuses the current NASA login token, handed through an in-memory
+stdin pipe. It never saves credentials to Drive, notebook outputs, temporary
+request files, or command arguments, and never prompts once per phase. The
+versioned worker archive contains only the exact notebook helpers and entrypoint;
+its SHA-256 is checked before execution. It is cached on the temporary runtime
+disk. Every new runtime still requires running the NASA login cell once.
+
 ERA5 source decoding is also bounded: maps and vortex checks now read one hour
 and one variable at a time, with one Zarr read worker and one Blosc codec thread.
 The selected 925-hPa regional arrays are copied into compact owned buffers so
@@ -117,7 +142,9 @@ The reusable exporter lives in `src/jpcz_catalog/case_review_batch.py` and is
 embedded as ordinary multiline source by `tools/update_notebook35_batch.py`.
 After rebuilding Notebook 35, apply its existing vortex-label updater and then
 this batch updater. It also invokes `tools/update_notebook35_memory.py` to embed
-`src/jpcz_catalog/case_review_memory.py`. Both updaters are idempotent.
+`src/jpcz_catalog/case_review_memory.py`, followed by
+`tools/update_notebook35_isolation.py` to create the worker archive and embed
+`src/jpcz_catalog/case_review_isolation.py`. These updaters are idempotent.
 
 Tests cover real three-page PDF output, all-event iteration, exact offsets,
 real browser Auto selection with synthetic Terra failure/Aqua success, bounded
@@ -125,6 +152,13 @@ pilot resume, deleted PDFs, failed phase placeholders, transient-data retries,
 permanent pre-MODIS gaps, the embedded wrapper, and the actual six-panel renderer
 without inline figure accumulation. Source fields are synthetic for offline
 checks; private NASA downloads still require the user's authenticated Colab run.
+
+Isolated-worker integration tests deliberately retain a 64-MiB buffer in each
+phase, verify distinct PIDs and bounded per-process peak memory, and confirm
+the parent performs no case reads or rendering. They check resume after an
+abrupt worker exit, memory-error propagation, child cleanup on timeout/interrupt,
+absence of the test token from files, and archive checksums. The bundled helpers
+must match the notebook source exactly.
 
 Memory regressions verify that each source load is a single time, level, and
 variable; that retained arrays own only compact regional memory; that the map
@@ -134,3 +168,12 @@ A cold read of the public ERA5 fields at 2001-12-21 06 UTC, where the reported
 batch crash occurred, completed in a local test process with about 773 MiB peak
 RSS and 55,956 bytes of retained regional data. This is a reader measurement,
 not a peak-RAM guarantee for the full Colab batch.
+
+A subsequent isolated-worker probe read public ERA5 at 2002-11-26 22 UTC and
+2002-11-27 10 UTC (Event 34's peak and the +12-hour frame where Colab stopped),
+using the real case reader and six-panel renderer. NASA login was mocked and
+precipitation, satellite imagery, and vortex results were cached synthetic inputs.
+Both PNG/PDF exports completed. Child peak RSS was about 1,116 and 1,075 MiB;
+the parent stayed at 244.4 MiB after each child exited. This was a local macOS
+probe, not a complete 280-event authenticated Colab run or a guarantee of every
+future phase's peak memory.
