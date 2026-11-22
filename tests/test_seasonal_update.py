@@ -230,3 +230,130 @@ def test_chunk_checkpoint_interval_is_validated_before_any_drive_mutation(tmp_pa
     with pytest.raises(ValueError, match='divisible'):
         update.update_catalog(tmp_path, xr.Dataset(), chunk_hours=5, checkpoint_every_hours=24)
     assert not (tmp_path / 'seasonal_updates').exists()
+
+
+def local_wind_archive(hours=54):
+    times = pd.date_range('2026-11-01', periods=hours, freq='h')
+    lon, lat = np.arange(128., 138.1, .5), np.arange(42., 34.9, -.5)
+    shape = (hours, len(lat), len(lon))
+    u = np.broadcast_to(-8. * (lon - 132.)[None, None, :], shape).copy()
+    winds = xr.Dataset({'u_component_of_wind': (('time', 'latitude', 'longitude'), u),
+                        'v_component_of_wind': (('time', 'latitude', 'longitude'), np.zeros(shape))},
+                       coords={'time': times, 'latitude': lat, 'longitude': lon})
+    archive = fake_archive(str(times[-1]), stable='2026-08-31T23:00')
+    archive.attrs['last_updated'] = '2026-11-21T18:21:05Z'
+    return winds, archive
+
+
+def test_missing_interior_wind_hour_saves_good_prefix_and_retries_without_bridging(tmp_path, monkeypatch):
+    from jpcz_catalog import historical_catalog as history
+    from jpcz_catalog.detect import compute_polygon_mean_divergence_series, prepare_detection_geometry
+    seed_catalog(tmp_path)
+    winds, archive = local_wind_archive()
+    original_winds = winds.copy(deep=True)
+    geometry = prepare_detection_geometry(winds.longitude, winds.latitude, update.JPCZ_POLYGON_VERTICES)
+    expected_hourly, expected_d12, _ = compute_polygon_mean_divergence_series(original_winds, geometry=geometry)
+    winds['u_component_of_wind'][31, :, :] = np.nan
+    winds['v_component_of_wind'][31, :, :] = np.nan
+    monkeypatch.setattr(update, 'subset_era5_window', lambda ds, start, end, **kw: winds.sel(time=slice(start, end)))
+    args = dict(update_start='2026-11-01', requested_end=str(winds.time.values[-1]), progress=lambda _: None)
+    first = update.update_catalog(tmp_path, archive, **args)
+    assert first['status'] == 'updated_with_pending_wind_data'
+    assert first['scanned_through'] == pd.Timestamp(winds.time.values[30]).isoformat()
+    assert first['first_missing_time_utc'] == pd.Timestamp(winds.time.values[31]).isoformat() + 'Z'
+    assert first['pending_data']['u_nonfinite_regional_cells'] > 0
+    with xr.open_dataarray(next((tmp_path / 'seasonal_updates/hourly').glob('era5t_*/*.nc'))) as partial:
+        assert partial.sizes['time'] == 31  # includes good hours since the 24-hour checkpoint
+        assert np.isfinite(partial.values).all()
+    with xr.open_dataarray(tmp_path / 'seasonal_updates/monthly/2026-11_D12.nc') as d12:
+        assert d12.sizes['time'] == 20
+        assert pd.Timestamp(d12.time.values[-1]) == pd.Timestamp(winds.time.values[30])
+        np.testing.assert_allclose(d12.values, expected_d12.dropna('time').values[:20])
+    current = update.read_events(tmp_path / update.MERGED_NAME)
+    assert current.event_end.max() <= pd.Timestamp(winds.time.values[30])
+    assert (tmp_path / 'seasonal_updates/pending_data.csv').is_file()
+    real_divergence = history.mpcalc.divergence
+    batches = []
+    def count(u, *args, **kwargs):
+        batches.append(len(u))
+        return real_divergence(u, *args, **kwargs)
+    monkeypatch.setattr(history.mpcalc, 'divergence', count)
+    update.update_catalog(tmp_path, archive, **args)
+    assert batches == [6]  # retries the hole, rather than reading all earlier hours again
+    winds['u_component_of_wind'][31, :, :] = original_winds['u_component_of_wind'][31].values
+    winds['v_component_of_wind'][31, :, :] = original_winds['v_component_of_wind'][31].values
+    batches.clear()
+    filled = update.update_catalog(tmp_path, archive, **args)
+    assert batches == [6, 6, 6, 5]
+    assert filled['status'] == 'updated'
+    assert filled['first_missing_time_utc'] is None
+    assert not (tmp_path / 'seasonal_updates/pending_data.csv').exists()
+    with xr.open_dataarray(tmp_path / 'seasonal_updates/monthly/2026-11_D12.nc') as d12:
+        np.testing.assert_allclose(d12.values, expected_d12.dropna('time').values)
+
+
+@pytest.mark.parametrize('missing_index', [0, 5])
+def test_missing_winds_before_first_d12_preserve_catalog(tmp_path, monkeypatch, missing_index):
+    seed_catalog(tmp_path)
+    winds, archive = local_wind_archive(hours=18)
+    winds['u_component_of_wind'][missing_index, :, :] = np.nan
+    monkeypatch.setattr(update, 'subset_era5_window', lambda ds, start, end, **kw: winds.sel(time=slice(start, end)))
+    original = (tmp_path / update.MERGED_NAME).read_bytes()
+    result = update.update_catalog(tmp_path, archive, update_start='2026-11-01',
+                                  requested_end=str(winds.time.values[-1]), progress=lambda _: None)
+    assert result['status'] == 'pending_wind_data_catalog_unchanged'
+    assert not result['catalog_updated']
+    assert (tmp_path / update.MERGED_NAME).read_bytes() == original
+    assert not (tmp_path / 'seasonal_updates/scan_manifest.json').exists()
+
+
+def test_new_revision_gap_cannot_reduce_existing_catalog_coverage(tmp_path, monkeypatch):
+    seed_catalog(tmp_path)
+    winds, archive = local_wind_archive()
+    monkeypatch.setattr(update, 'subset_era5_window', lambda ds, start, end, **kw: winds.sel(time=slice(start, end)))
+    args = dict(update_start='2026-11-01', requested_end=str(winds.time.values[-1]), progress=lambda _: None)
+    update.update_catalog(tmp_path, archive, **args)
+    original = (tmp_path / update.MERGED_NAME).read_bytes()
+    manifest = (tmp_path / 'seasonal_updates/scan_manifest.json').read_bytes()
+    winds['u_component_of_wind'][31, :, :] = np.nan
+    archive.attrs['last_updated'] = '2026-11-21T20:00:00Z'
+    result = update.update_catalog(tmp_path, archive, **args)
+    assert result['status'] == 'pending_wind_data_catalog_unchanged'
+    assert (tmp_path / update.MERGED_NAME).read_bytes() == original
+    assert (tmp_path / 'seasonal_updates/scan_manifest.json').read_bytes() == manifest
+
+
+def test_old_nonfinite_checkpoint_tail_is_salvaged_and_irrelevant_nans_do_not_poison_mean(tmp_path):
+    from jpcz_catalog.historical_catalog import compute_polygon_mean_divergence_series_chunked
+    from jpcz_catalog.detect import compute_polygon_mean_divergence_series, prepare_detection_geometry
+    winds, _ = local_wind_archive(hours=30)
+    geometry = prepare_detection_geometry(winds.longitude, winds.latitude, update.JPCZ_POLYGON_VERTICES)
+    hourly, d12, _ = compute_polygon_mean_divergence_series(winds.copy(deep=True), geometry=geometry)
+    old = hourly.copy(deep=True)
+    old.values[7:] = np.nan
+    path = tmp_path / 'old_hourly.nc'
+    old.to_netcdf(path)
+    # This corner is far outside the polygon and all its required derivative stencils.
+    winds['u_component_of_wind'][15, 0, 0] = np.nan
+    actual_hourly, actual_d12 = compute_polygon_mean_divergence_series_chunked(
+        winds, geometry=geometry, chunk_hours=6, progress_every_hours=24, hourly_checkpoint_path=path)
+    np.testing.assert_allclose(actual_hourly.values, hourly.values)
+    np.testing.assert_allclose(actual_d12.values, d12.values, equal_nan=True)
+    with xr.open_dataarray(path) as saved:
+        assert len(saved.time) == 30
+        assert np.isfinite(saved.values).all()
+
+
+def test_finite_wind_numerical_failure_is_not_misreported_as_pending_archive(tmp_path, monkeypatch):
+    from jpcz_catalog import historical_catalog as history
+    seed_catalog(tmp_path)
+    winds, archive = local_wind_archive(hours=18)
+    monkeypatch.setattr(update, 'subset_era5_window', lambda ds, start, end, **kw: winds.sel(time=slice(start, end)))
+    class FailedCalculation:
+        magnitude = np.full((6, winds.sizes['latitude'], winds.sizes['longitude']), np.nan)
+    monkeypatch.setattr(history.mpcalc, 'divergence', lambda *a, **kw: FailedCalculation())
+    original = (tmp_path / update.MERGED_NAME).read_bytes()
+    with pytest.raises(history.IncompleteDivergenceError, match='finite_winds'):
+        update.update_catalog(tmp_path, archive, update_start='2026-11-01',
+                              requested_end=str(winds.time.values[-1]), progress=lambda _: None)
+    assert (tmp_path / update.MERGED_NAME).read_bytes() == original

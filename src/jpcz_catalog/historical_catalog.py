@@ -37,6 +37,17 @@ class NDJFMonth:
     month: int
 
 
+class IncompleteDivergenceError(ValueError):
+    """A missing input interrupts the continuous series; retain its finite prefix."""
+
+    def __init__(self, hourly: xr.DataArray, details: dict):
+        self.hourly, self.details = hourly, details
+        super().__init__(
+            f"{details['first_invalid_time_utc']}: {details['cause']}; "
+            f"{details['nonfinite_polygon_divergence_cells']} nonfinite polygon divergence cells. "
+            f"Preserved {hourly.sizes['time']} preceding hourly means; no missing hour was skipped.")
+
+
 def complete_ndjf_months(
     first_season_year: int = 1940,
     last_season_year: int = 2025,
@@ -253,12 +264,16 @@ def compute_polygon_mean_divergence_series_chunked(
             cached_times = np.asarray(cached.time.values)
             if (
                 "time" in cached.dims
+                and cached_values.ndim == 1
                 and 0 < len(cached_values) <= n_hours
-                and np.isfinite(cached_values).all()
                 and np.array_equal(cached_times, timestamps[: len(cached_values)])
             ):
-                hourly_values = cached_values.tolist()
+                invalid = np.flatnonzero(~np.isfinite(cached_values))
+                prefix = int(invalid[0]) if len(invalid) else len(cached_values)
+                hourly_values = cached_values[:prefix].tolist()
                 resume_index = len(hourly_values)
+                if prefix < len(cached_values):
+                    print(f"{progress_label}: recovering {prefix} finite hours before an invalid saved tail")
                 print(f"{progress_label}: resuming {resume_index}/{n_hours} saved hourly fields")
             else:
                 print(f"{progress_label}: ignoring incompatible hourly partial checkpoint")
@@ -272,6 +287,20 @@ def compute_polygon_mean_divergence_series_chunked(
     weight_total = float(weight_values.sum())
     if not np.isfinite(weight_total) or weight_total <= 0:
         raise ValueError("Polygon weights must have a positive finite sum")
+    polygon_cells = weight_values > 0
+
+    def hourly_array():
+        return xr.DataArray(
+            np.asarray(hourly_values, dtype=float), coords={"time": timestamps[:len(hourly_values)]},
+            dims="time", name="polygon_mean_divergence_925hpa",
+            attrs={"units": "s^-1", "display_units": "1e-5 s^-1"})
+
+    def save_progress():
+        if checkpoint is not None and hourly_values:
+            partial_hourly = hourly_array()
+            partial_hourly.attrs["checkpoint"] = "resumable partial hourly series"
+            write_dataarray_atomic(partial_hourly, checkpoint)
+            print(f"{progress_label}: hourly partial checkpoint saved ({len(hourly_values)}/{n_hours})")
 
     dx_values = np.asarray(geometry.dx.magnitude)
     dy_values = np.asarray(geometry.dy.magnitude)
@@ -292,22 +321,32 @@ def compute_polygon_mean_divergence_series_chunked(
             x_dim=-1,
             y_dim=-2,
         ).magnitude
-        polygon_means = (divergence * weight_values[None, :, :]).sum(axis=(-2, -1)) / weight_total
+        finite_polygon = np.isfinite(divergence[:, polygon_cells]).all(axis=1)
+        # NaN * zero remains NaN. Cells outside the polygon are not part of its
+        # mean; relevant derivative stencils are still checked by finite_polygon.
+        weighted = np.where(polygon_cells[None, :, :], divergence, 0.) * weight_values[None, :, :]
+        polygon_means = weighted.sum(axis=(-2, -1)) / weight_total
+        invalid = np.flatnonzero(~finite_polygon | ~np.isfinite(polygon_means))
+        if len(invalid):
+            index = int(invalid[0])
+            hourly_values.extend(np.asarray(polygon_means[:index], dtype=float).tolist())
+            save_progress()  # Preserve the good hours even between regular save intervals.
+            missing = {name: int((~np.isfinite(chunk[name].values[index])).sum())
+                       for name in ("u_component_of_wind", "v_component_of_wind")}
+            details = {
+                "first_invalid_time_utc": pd.Timestamp(timestamps[start + index]).isoformat() + "Z",
+                "cause": "nonfinite_wind_inputs" if any(missing.values()) else "nonfinite_divergence_from_finite_winds",
+                "u_nonfinite_regional_cells": missing["u_component_of_wind"],
+                "v_nonfinite_regional_cells": missing["v_component_of_wind"],
+                "nonfinite_polygon_divergence_cells": int((~np.isfinite(divergence[index][polygon_cells])).sum()),
+            }
+            raise IncompleteDivergenceError(hourly_array(), details)
         hourly_values.extend(np.asarray(polygon_means, dtype=float).tolist())
         if stop % progress_every_hours == 0 or stop == n_hours:
             print(f"{progress_label}: {stop}/{n_hours} hourly fields complete")
         if checkpoint is not None and (stop % progress_every_hours == 0 or stop == n_hours):
-            partial_hourly = xr.DataArray(
-                np.asarray(hourly_values),
-                coords={"time": timestamps[:stop]},
-                dims="time",
-                name="polygon_mean_divergence_925hpa",
-                attrs={"units": "s^-1", "checkpoint": "resumable partial hourly series"},
-            )
-            write_dataarray_atomic(partial_hourly, checkpoint)
-            print(f"{progress_label}: hourly partial checkpoint saved ({stop}/{n_hours})")
-            del partial_hourly
-        del chunk, divergence, polygon_means, dx_chunk, dy_chunk
+            save_progress()
+        del chunk, divergence, weighted, polygon_means, dx_chunk, dy_chunk
         gc.collect()
 
     hourly = xr.DataArray(

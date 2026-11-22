@@ -59,7 +59,9 @@ coverage, new/revised identities, provisional flags, and the exact detector.
 The baseline copies and staged `candidate_raw.csv` / `candidate_merged.csv`
 allow recovery if Drive disconnects while the two canonical files are being
 replaced. A scientific/read failure during the scan leaves canonical files
-untouched. The two file replacements are not a distributed transaction.
+untouched. Missing wind inputs are handled separately: a continuously verified
+prefix can be promoted with the remaining dates explicitly pending. The two
+file replacements are not a distributed transaction.
 
 ## Cloud reads, RAM, and recovery after a crash
 
@@ -79,6 +81,23 @@ and file replacement. Restart the notebook and reconnect the same Drive to
 resume: the hourly prefix must have matching times and finite scalar values.
 Only work since the last completed checkpoint needs to be repeated for the
 same source snapshot.
+
+If a wind hour is missing, even inside the archive's advertised date range,
+Notebook 38 immediately saves all finite hourly means before that hour. It
+stops the continuous series there, records the exact time and nonfinite-cell
+counts in `seasonal_updates/pending_data.csv`, and reports
+`updated_with_pending_wind_data` when that prefix can update the catalog.
+Dates after the gap are unverified, not non-events. A rolling mean never crosses
+the gap. On retry, a compatible hourly checkpoint resumes at that missing hour.
+Old checkpoints with a nonfinite tail are trimmed to their finite leading
+prefix automatically; do not delete the Drive checkpoint folders.
+
+If fewer than 12 good hourly values precede the gap, or the new source revision
+would reduce existing catalog coverage, the catalog remains unchanged and
+`pending_scan.json` records the attempted scan. A calculation failure with
+finite wind inputs still raises an error. NaNs outside the polygon contribute
+no weight; all divergence cells within the polygon, including their required
+wind derivative stencils, must be finite.
 
 Final ERA5 partials live in `seasonal_updates/hourly/`. Preliminary ERA5T
 partials live in a revision-specific subdirectory there. Their revision key
@@ -185,3 +204,9 @@ reuse of a completed unchanged ERA5T slice, and recalculation after an archive
 revision or finalization. Its resumed hourly and D12 values match Notebook 04's
 whole-window calculation on the same synthetic wind grid. This does not replace
 an event-for-event comparison on real historical data.
+
+Additional tests reproduce missing interior wind hours with later fields
+present, retry and fill the gap, recover an older nonfinite checkpoint tail,
+preserve a catalog when data are missing before the first D12 window or when
+source revisions reduce coverage, distinguish numerical failures from missing
+inputs, and ignore irrelevant nonfinite cells outside the polygon.

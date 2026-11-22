@@ -13,10 +13,11 @@ import xarray as xr
 import zarr
 
 from .config import JPCZ_POLYGON_VERTICES, ARCO_ERA5_ZARR_STORE
-from .detect import count_events_from_threshold, merge_nearby_events, prepare_detection_geometry, threshold_from_std
+from .detect import (compute_rolling_mean, count_events_from_threshold, merge_nearby_events,
+                     prepare_detection_geometry, threshold_from_std)
 from .era5 import subset_era5_window
 from .historical_catalog import (
-    NDJFMonth, compute_polygon_mean_divergence_series_chunked, find_existing_checkpoint,
+    IncompleteDivergenceError, NDJFMonth, compute_polygon_mean_divergence_series_chunked, find_existing_checkpoint,
     validate_d12_checkpoint, write_dataframe_atomic, write_dataarray_atomic,
 )
 
@@ -198,12 +199,13 @@ def update_catalog(root, ds, *, update_start=None, requested_end=None, allow_era
     baseline = read_events(folder / ('baseline_' + RAW_NAME))
     # Do not erase later extensions if somebody requests an earlier end date on a rerun.
     previous = folder / 'scan_manifest.json'
-    if previous.exists() and stop < pd.Timestamp(json.loads(previous.read_text())['scanned_through']):
+    previous_stop = pd.Timestamp(json.loads(previous.read_text())['scanned_through']) if previous.exists() else None
+    if previous_stop is not None and stop < previous_stop:
         raise ValueError('Requested/available end precedes an existing scan. Keep or extend the saved end date.')
     if stop < start:
         return {'status': 'pending_era5', 'available_through': str(available), 'requested_through': str(requested),
                 'pending_after': str(available), 'merged_events': len(read_events(root / MERGED_NAME))}
-    event_frames, inventory = [], []
+    event_frames, inventory, pending_issue = [], [], None
     for period in pd.period_range(start, stop, freq='M'):
         if period.month not in thresholds.index:
             continue
@@ -239,17 +241,34 @@ def update_catalog(root, ds, *, update_start=None, requested_end=None, allow_era
             partial = partial_root / f'{stamp}.nc'
             # Source chunks span the globe and all levels even after regional selection.
             # Limit their decoding concurrency as well as the regional processing batch.
-            with zarr.config.set({'async.concurrency': 1, 'threading.max_workers': 2}):
-                hourly, d12 = compute_polygon_mean_divergence_series_chunked(
-                    winds, geometry=geometry, chunk_hours=chunk_hours,
-                    progress_every_hours=checkpoint_every_hours,
-                    progress_label=stamp, hourly_checkpoint_path=partial)
+            try:
+                with zarr.config.set({'async.concurrency': 1, 'threading.max_workers': 2}):
+                    hourly, d12 = compute_polygon_mean_divergence_series_chunked(
+                        winds, geometry=geometry, chunk_hours=chunk_hours,
+                        progress_every_hours=checkpoint_every_hours,
+                        progress_label=stamp, hourly_checkpoint_path=partial)
+            except IncompleteDivergenceError as error:
+                pending_issue = {**error.details, 'month': stamp, 'source_product': product,
+                                 'source_revision': revision, 'hourly_checkpoint': str(partial),
+                                 'published_available_through': available.isoformat()}
+                write_dataframe_atomic(pd.DataFrame([pending_issue]), folder / 'pending_data.csv')
+                if error.details['cause'] != 'nonfinite_wind_inputs':
+                    # A numerical failure with finite inputs is not an archive availability gap.
+                    raise
+                hourly = error.hourly
+                stop = pd.to_datetime(error.details['first_invalid_time_utc'], utc=True).tz_localize(None) - pd.Timedelta(hours=1)
+                end = stop
+                d12 = (compute_rolling_mean(hourly, window=12, min_periods=12, name='D_12h')
+                       if hourly.sizes['time'] >= 12 else xr.full_like(hourly, np.nan).rename('D_12h'))
+                progress(f"  Missing 925-hPa winds at {error.details['first_invalid_time_utc']}. "
+                         f"Continuous hourly progress saved through {stop}; later dates remain pending.")
             if not np.isfinite(hourly.values).all():
                 raise ValueError(f'{stamp}: nonfinite winds/divergence; catalog was not updated.')
             cached = d12.dropna('time')
             cached.attrs.update(source_product=product, source_revision=revision, scanned_through=end.isoformat(),
                                 archive_last_updated=last_updated)
-            write_dataarray_atomic(cached, path)
+            if cached.sizes['time']:
+                write_dataarray_atomic(cached, path)
         events = count_events_from_threshold(cached, float(thresholds[period.month]))
         if not events.empty:
             events['year'], events['month'] = period.year, period.month
@@ -261,7 +280,21 @@ def update_catalog(root, ds, *, update_start=None, requested_end=None, allow_era
             events['catalog_provisional'] = (events.event_end + pd.Timedelta(hours=12) >= stop) | (product == 'ERA5T')
             event_frames.append(events)
         inventory.append({'month': stamp, 'scanned_through': str(end), 'source_product': product,
-                          'source_revision': revision, 'events': len(events), 'checkpoint': str(path)})
+                          'source_revision': revision, 'events': len(events), 'checkpoint': str(path),
+                          'valid_D12_hours': int(cached.sizes['time']),
+                          'status': 'pending_wind_data' if pending_issue else 'complete'})
+        if pending_issue:
+            break  # Never bridge an unknown hour with later apparently valid fields.
+    write_dataframe_atomic(pd.DataFrame(inventory), folder / 'monthly_scan_status.csv')
+    if pending_issue and (not any(item['valid_D12_hours'] for item in inventory)
+                          or (previous_stop is not None and stop < previous_stop)):
+        result = {'status': 'pending_wind_data_catalog_unchanged', 'catalog_updated': False,
+                  'available_through': available.isoformat(), 'requested_through': requested.isoformat(),
+                  'continuous_data_through': stop.isoformat(), 'first_missing_time_utc': pending_issue['first_invalid_time_utc'],
+                  'merged_events': len(read_events(root / MERGED_NAME)), 'pending_data': pending_issue}
+        (folder / 'pending_scan.json').write_text(json.dumps(result, indent=2) + '\n')
+        progress(str(result))
+        return result
     extension = pd.concat(event_frames, ignore_index=True) if event_frames else baseline.iloc[:0].copy()
     combined = pd.concat([baseline, extension], ignore_index=True).sort_values('event_start').reset_index(drop=True)
     merged = merge_nearby_events(combined, max_gap_hours=12)
@@ -292,16 +325,22 @@ def update_catalog(root, ds, *, update_start=None, requested_end=None, allow_era
     write_dataframe_atomic(combined, folder / 'candidate_raw.csv')
     write_dataframe_atomic(merged, folder / 'candidate_merged.csv')
     write_dataframe_atomic(changes, folder / 'event_changes.csv')
-    write_dataframe_atomic(pd.DataFrame(inventory), folder / 'monthly_scan_status.csv')
     write_dataframe_atomic(combined, root / RAW_NAME)
     write_dataframe_atomic(merged, root / MERGED_NAME)
-    result = {'status': 'updated' if requested <= available else 'updated_with_pending_era5_tail',
+    result = {'status': ('updated_with_pending_wind_data' if pending_issue else
+                         'updated' if requested <= available else 'updated_with_pending_era5_tail'),
+              'catalog_updated': True,
               'scanned_through': stop.isoformat(), 'available_through': available.isoformat(),
               'requested_through': requested.isoformat(), 'merged_events': len(merged),
               'new_or_revised': int(changes.update_status.ne('unchanged').sum()),
               'provisional_events': int(merged.catalog_provisional.sum()), 'allow_era5t': allow_era5t,
               'processing_chunk_hours': chunk_hours, 'checkpoint_every_hours': checkpoint_every_hours,
+              'first_missing_time_utc': pending_issue['first_invalid_time_utc'] if pending_issue else None,
+              'pending_data': pending_issue,
               'detector': manifest['detector']}
     previous.write_text(json.dumps(result, indent=2) + '\n')
+    if not pending_issue:
+        (folder / 'pending_data.csv').unlink(missing_ok=True)
+        (folder / 'pending_scan.json').unlink(missing_ok=True)
     progress(str(result))
     return result

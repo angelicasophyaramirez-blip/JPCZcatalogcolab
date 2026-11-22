@@ -56,7 +56,8 @@ implementation choices. Vortex labels are a separate review in Notebook 35, not 
 Your actual Drive CSV supplies the count (whether it is 275 or another number). Old events
 and threshold files are backed up before the first update. New thresholds are never fitted to
 the new winter. Winds stay lazy until regional, 925-hPa, short time batches are selected.
-Scans save compact scalar progress to Drive within each month; a failed month cannot promote a partial catalog.
+Scans save compact scalar progress to Drive within each month. Only continuously verified
+hours enter the updated catalog; archive gaps and later dates remain explicitly pending.
 '''),
 cell('code', '''
 # @title 1 · Install dependencies
@@ -116,8 +117,9 @@ An event still touching the scan boundary, or one detected from ERA5T, is marked
 Its end/peak may change on a later scan. The next run reconstructs the extension and merges
 it with the frozen baseline, rather than appending duplicate rows.
 
-ARCO's published data stop controls what can be read. Coordinates alone do not prove fields
-are populated. An event on November 19 will wait for reference data; missing days are reported
+ARCO's published data stop limits what can be requested; individual wind chunks can still
+be missing inside that range. Coordinates and metadata alone do not prove fields are populated.
+An event on November 19 will wait for reference data; missing days are reported
 as pending. [ARCO documentation](https://github.com/google-research/arco-era5#overview) describes
 roughly one week of ERA5T delay and about three months for final ERA5.
 
@@ -133,9 +135,25 @@ A changed archive revision uses fresh partial files; final ERA5 also replaces pr
 calculations. If `last_updated` is absent, progress is still saved, but it cannot safely be
 reused in another run. No full month of wind maps is retained in memory. Actual peak RAM
 still depends on the archive's compressed source chunks and the Colab runtime.
+
+**Missing wind hours:** the scan stops at the first nonfinite polygon calculation caused
+by missing winds, saves the preceding finite hourly means immediately, and records the
+exact time and counts in `seasonal_updates/pending_data.csv`. A sufficiently long continuous
+prefix can update the catalog; remaining dates stay pending. A gap is never filled with zero,
+skipped, or crossed by a rolling mean. If fewer than 12 good hours are available, or a changed
+archive would reduce previously saved coverage, the existing catalog is kept. A numerical
+failure with finite wind inputs still raises an error for investigation.
+
+Rerun to retry the missing hour after the archive is filled. Checkpoints from the earlier
+notebook version containing a nonfinite tail are automatically trimmed to their finite
+prefix. Keep your Drive backup/checkpoint folders; no manual deletion is needed.
 '''),
 cell('code', '''
 # @title 5 · Run the seasonal update and save the shared catalog
+# Reopen metadata on every retry so newly published/revised hours are visible.
+if 'era5' in globals():
+    era5.close()
+era5 = open_arco_era5(chunks=None)
 manifest = initialize_update(DRIVE_ROOT, UPDATE_START_UTC or None)
 print('Frozen update start:', manifest['update_start'])
 print('Threshold source:', manifest['threshold_source'])
@@ -146,6 +164,10 @@ print(json.dumps(result, indent=2))
 status_path = DRIVE_ROOT / 'seasonal_updates/monthly_scan_status.csv'
 if status_path.exists():
     display(pd.read_csv(status_path))
+pending_path = DRIVE_ROOT / 'seasonal_updates/pending_data.csv'
+if pending_path.exists():
+    print('These dates are pending input data; they are not verified non-events:')
+    display(pd.read_csv(pending_path))
 '''),
 cell('code', '''
 # @title 6 · Search updated events by UTC date
