@@ -102,7 +102,16 @@ def test_frozen_threshold_edits_and_overlap_are_rejected(tmp_path):
         update.initialize_update(tmp_path)
 
 
-def test_standalone_notebooks_compile_and_update_bundle_loads():
+def test_notebooks_compile_and_short_update_loader_imports_verified_bundle(tmp_path, monkeypatch):
+    import io
+    import tempfile
+    import urllib.request
+    downloads = []
+    def download(url, timeout):
+        downloads.append(url)
+        return io.BytesIO((ROOT / 'notebooks/support' / url.rsplit('/', 1)[-1]).read_bytes())
+    monkeypatch.setattr(urllib.request, 'urlopen', download)
+    monkeypatch.setattr(tempfile, 'gettempdir', lambda: str(tmp_path))
     for number in ('35', '36', '37', '38'):
         path = next((ROOT / 'notebooks').glob(number + '*.ipynb'))
         notebook = nbformat.read(path, as_version=4)
@@ -111,9 +120,37 @@ def test_standalone_notebooks_compile_and_update_bundle_loads():
             if item.cell_type == 'code':
                 ast.parse(item.source)
                 if number == '38' and item.source.startswith('# @title 3'):
+                    assert len(item.source) < 3000
+                    assert max(map(len, item.source.splitlines())) < 150
+                    assert item.metadata['cellView'] == 'form'
                     namespace = {'__name__': '__main__'}
                     exec(compile(item.source, 'notebook38_helpers', 'exec'), namespace)
                     assert callable(namespace['update_catalog'])
+                    assert namespace['update_catalog'].__module__ == 'jpcz_update_runtime.seasonal_update'
+                    assert len(downloads) == 1
+                    # A rerun uses the already verified local helper file.
+                    exec(compile(item.source, 'notebook38_helpers', 'exec'), namespace)
+                    assert len(downloads) == 1
+
+
+def test_update_loader_rejects_incorrect_download_and_reports_connection_errors(tmp_path, monkeypatch):
+    import io
+    import tempfile
+    import urllib.error
+    import urllib.request
+    notebook = nbformat.read(ROOT / 'notebooks/38_update_winter_catalog.ipynb', as_version=4)
+    source = next(item.source for item in notebook.cells
+                  if item.cell_type == 'code' and item.source.startswith('# @title 3'))
+    monkeypatch.setattr(tempfile, 'gettempdir', lambda: str(tmp_path))
+    monkeypatch.setattr(urllib.request, 'urlopen', lambda *args, **kwargs: io.BytesIO(b'wrong file'))
+    with pytest.raises(RuntimeError, match='verification failed'):
+        exec(compile(source, 'notebook38_helpers', 'exec'), {'__name__': '__main__'})
+    assert not list(tmp_path.glob('notebook38_runtime_*.zip'))
+    def disconnected(*args, **kwargs):
+        raise urllib.error.URLError('offline')
+    monkeypatch.setattr(urllib.request, 'urlopen', disconnected)
+    with pytest.raises(RuntimeError, match='rerun cell 3'):
+        exec(compile(source, 'notebook38_helpers', 'exec'), {'__name__': '__main__'})
 
 
 def test_preliminary_month_is_refreshed_until_finalized(tmp_path, monkeypatch):

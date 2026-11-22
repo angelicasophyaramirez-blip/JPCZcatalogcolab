@@ -19,14 +19,17 @@ The linked Notebook 37 revision is `196db5d`, on
 `codex/notebook36-weathernext2`. Its Notebook 04 has calendar years 2000–2025;
 repository `main` at `e6458fd` has an older 2000–2018 Notebook 04. Notebook **34**
 is a separate full-record historical-baseline calculation and must not be used
-to append to the established catalog. Notebook 38 embeds the current detector
-helpers so that rerunning an old Git clone cannot select the older version.
+to append to the established catalog. Notebook 38 loads a small versioned ZIP
+of the detector helpers and checks its SHA-256 before importing them. Cell 3
+contains a short loader, with progress and completion messages, rather than
+the helper source as one very long escaped string. It does not clone the
+repository, so an old Git clone cannot select the older detector version.
 The actual original Drive baseline cannot be certified from a GitHub link;
 Notebook 38 records the actual saved files and threshold values used.
 
 ## First update and later winters
 
-Run Notebook 38's installation, Drive, embedded-helper, and inspection cells.
+Run Notebook 38's installation, Drive, helper-loading, and inspection cells.
 Inspect the actual raw/merged counts, dates, and saved checkpoint coverage.
 A last event date alone does not establish the last analyzed day. The notebook
 suggests the next calendar month only when the last event's month has a complete
@@ -194,7 +197,7 @@ strata describe reviewed observed events, not probabilistic vortex prediction.
 Offline synthetic tests cover extension without duplication, immutable baseline
 and thresholds, pending ERA5, revised ongoing events, probability 0/1 binning,
 strict threshold equality, incomplete cases, unchecked vortex labels, the exact
-November 19 initialization dates, standalone notebook compilation, and the
+November 19 initialization dates, notebook compilation and checked helper imports, and the
 existing 64-member verification/checkpoint/export workflow. Live private WN2
 and Drive retrieval require the user's Colab Google authentication.
 
@@ -210,3 +213,11 @@ present, retry and fill the gap, recover an older nonfinite checkpoint tail,
 preserve a catalog when data are missing before the first D12 window or when
 source revisions reduce coverage, distinguish numerical failures from missing
 inputs, and ignore irrelevant nonfinite cells outside the polygon.
+
+The short cell 3 loader is tested with the exact published helper ZIP: normal
+imports, a repeat run using the verified local file, checksum rejection, and
+an actionable connection error. The bundle is about 21 KB and uses only the
+dependencies installed in cell 1. It is cached in the runtime's temporary
+directory; scientific checkpoints and catalogs continue to persist in Drive.
+Future builder runs must retain older content-addressed bundles in
+`notebooks/support/` so previously shared notebook versions keep working.

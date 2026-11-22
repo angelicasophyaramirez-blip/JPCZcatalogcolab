@@ -1,8 +1,11 @@
-"""Build a standalone, versioned extension of the established Notebook 04/06 detector."""
+"""Build the Colab update notebook and its small, versioned detector helper bundle."""
 import ast
+import hashlib
+import io
 import json
 from pathlib import Path
 import textwrap
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 TARGET = ROOT / 'notebooks/38_update_winter_catalog.ipynb'
@@ -15,25 +18,58 @@ def cell(kind, source):
         result.update(execution_count=None, outputs=[])
     return result
 
-sources = {name: (ROOT / 'src/jpcz_catalog' / f'{name}.py').read_text()
-           for name in ('config', 'masks', 'detect', 'era5', 'historical_catalog', 'seasonal_update')}
-loader = '''# @title 3 · Load the embedded detector (no Git branch checkout required)
-import sys, types
-sources = SOURCES
-package_name = 'jpcz_update_runtime'
-package = types.ModuleType(package_name)
-package.__path__ = []
-sys.modules[package_name] = package
-for name, source in sources.items():
-    qualified = package_name + '.' + name
-    module = types.ModuleType(qualified)
-    module.__package__ = package_name
-    sys.modules[qualified] = module
-    exec(compile(source, qualified, 'exec'), module.__dict__)
+sources = {'__init__': '"""Versioned Notebook 38 detector helpers."""\n'}
+sources.update({name: (ROOT / 'src/jpcz_catalog' / f'{name}.py').read_text()
+                for name in ('config', 'masks', 'detect', 'era5', 'historical_catalog', 'seasonal_update')})
+buffer = io.BytesIO()
+with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
+    for name, source in sources.items():
+        ast.parse(source)
+        info = zipfile.ZipInfo(f'jpcz_update_runtime/{name}.py', date_time=(1980, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_DEFLATED
+        info.external_attr = 0o644 << 16
+        bundle.writestr(info, source)
+bundle_bytes = buffer.getvalue()
+bundle_hash = hashlib.sha256(bundle_bytes).hexdigest()
+bundle_name = f'notebook38_runtime_{bundle_hash[:16]}.zip'
+support_dir = ROOT / 'notebooks' / 'support'
+support_dir.mkdir(exist_ok=True)
+(support_dir / bundle_name).write_bytes(bundle_bytes)
+
+loader = '''# @title 3 · Load detector helpers
+import hashlib
+import importlib
+import sys
+import tempfile
+import urllib.request
+from pathlib import Path
+
+print('Loading detector helpers...', flush=True)
+HELPER_URL = (
+    'https://raw.githubusercontent.com/angelicasophyaramirez-blip/'
+    'JPCZcatalogcolab/codex/notebook36-weathernext2/notebooks/support/'
+    'BUNDLE_NAME'
+)
+HELPER_SHA256 = 'BUNDLE_HASH'
+helper_file = Path(tempfile.gettempdir()) / 'BUNDLE_NAME'
+if not helper_file.exists() or hashlib.sha256(helper_file.read_bytes()).hexdigest() != HELPER_SHA256:
+    try:
+        with urllib.request.urlopen(HELPER_URL, timeout=30) as response:
+            helper_bytes = response.read()
+    except Exception as error:
+        raise RuntimeError('Could not download detector helpers. Check the connection and rerun cell 3.') from error
+    if hashlib.sha256(helper_bytes).hexdigest() != HELPER_SHA256:
+        raise RuntimeError('Detector helper verification failed. Reopen the updated notebook and rerun cell 3.')
+    helper_file.write_bytes(helper_bytes)
+sys.path.insert(0, str(helper_file))
+for name in list(sys.modules):
+    if name == 'jpcz_update_runtime' or name.startswith('jpcz_update_runtime.'):
+        del sys.modules[name]
+importlib.invalidate_caches()
 from jpcz_update_runtime.seasonal_update import inspect_catalog, initialize_update, update_catalog
 from jpcz_update_runtime.era5 import open_arco_era5
-print('Established hourly MetPy / trailing-D12 / frozen monthly thresholds / 12-hour merge loaded.')
-'''.replace('SOURCES', repr(sources))
+print('Detector helpers ready. Continue to cell 4.', flush=True)
+'''.replace('BUNDLE_NAME', bundle_name).replace('BUNDLE_HASH', bundle_hash)
 
 cells = [
 cell('markdown', '''
@@ -41,7 +77,8 @@ cell('markdown', '''
 
 **This is the update entry point for Notebooks 35, 36, and 37.** Start here to search
 for new events; you do not need to rerun the historical catalog or the old map batches.
-The detector is embedded, so an old clone or the repository's `main` settings cannot change it.
+Cell 3 loads a small versioned helper file and verifies its checksum. An old repository
+clone or the repository's `main` settings cannot change the selected detector.
 
 The established workflow is [Notebook 04: detector](https://colab.research.google.com/github/angelicasophyaramirez-blip/JPCZcatalogcolab/blob/codex/notebook36-weathernext2/notebooks/04_ndjf_catalog.ipynb)
 then [Notebook 06: 12-hour fragment merge](https://colab.research.google.com/github/angelicasophyaramirez-blip/JPCZcatalogcolab/blob/codex/notebook36-weathernext2/notebooks/06_gap_merge_catalog.ipynb).
@@ -210,9 +247,12 @@ in the background: rerun these stages when you want new figures.
 ]
 for index, item in enumerate(cells):
     item['id'] = f'jpcz-update-{index:02d}'
+    if item['cell_type'] == 'code' and ''.join(item['source']).startswith('# @title 3'):
+        item['metadata']['cellView'] = 'form'
 TARGET.write_text(json.dumps({'nbformat': 4, 'nbformat_minor': 5,
     'metadata': {'colab': {'name': TARGET.name, 'provenance': []},
                  'kernelspec': {'name': 'python3', 'display_name': 'Python 3'},
                  'language_info': {'name': 'python', 'version': '3.12'}},
     'cells': cells}, indent=1, ensure_ascii=False) + '\n')
 print(TARGET)
+print(f'Helper bundle: {bundle_name} ({len(bundle_bytes):,} bytes)')
