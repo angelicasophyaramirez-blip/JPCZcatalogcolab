@@ -505,6 +505,9 @@ def export_verification(tables, identity, destination):
     tables = dict(tables)
     ranks = tables["case_ranks"]
     tables["ordered_values"] = ordered_verification_values(tables["member_values"], ranks)
+    tables['crps_cases'] = continuous_ranked_scores(tables)
+    tables['crps_summary'] = continuous_score_summary(tables['crps_cases'])
+    tables['event_accounting'] = verification_event_accounting(tables)
     # A previously complete run must not leave count tables that describe an old sample.
     for name in ('rank_bin_counts', 'rank_group_counts', 'bin_counts'):
         (destination / f'{name}.csv').unlink(missing_ok=True)
@@ -549,6 +552,154 @@ def export_verification(tables, identity, destination):
     finally:
         temporary_path.unlink(missing_ok=True)
     return destination
+
+
+def empirical_ensemble_crps(members, reference):
+    """CRPS of the equally weighted empirical CDF, in the original variable units.
+
+    mean|X-y| - (1/(2*M**2))*sum_ij|Xi-Xj|. The sorted form uses O(M log M)
+    work and O(M) memory. This scores the finite ensemble CDF shown in the proposal;
+    it is not the independence-dependent 'fair' estimator of an underlying distribution.
+    """
+    values=np.asarray(members,dtype=np.float64)
+    if values.ndim!=1 or not len(values) or not np.isfinite(values).all() or not np.isfinite(reference):
+        raise ValueError('CRPS requires finite members and a finite verifying value.')
+    count=len(values)
+    first=float(np.mean(np.abs(values-reference)))
+    centered=np.sort(values-values[0])
+    second=float(np.dot(2*np.arange(1,count+1)-count-1,centered)/(count*count))
+    score=first-second
+    if score < -1e-12*max(1.,first,second):raise ArithmeticError('Negative empirical CRPS beyond rounding tolerance.')
+    return max(0.,score)
+
+
+def continuous_ranked_scores(tables, *, group='All'):
+    """Score saved polygon means only, retaining the common all-lead event sample."""
+    ranks=verification_subset(tables,group)
+    columns=['event_number','review_key','valid_time_utc','init_time_utc','polygon','lead_hours','lead_days',
+             'field','field_title','pressure_hpa','units','vortex_label','vortex_scan_status',
+             'vortex_classification','reference_product','member_count','era5_value','crps',
+             'ensemble_mean','ensemble_median','ensemble_min','ensemble_max','in_common_sample']
+    if ranks.empty:return pd.DataFrame(columns=columns)
+    keys=['review_key','polygon','lead_hours']
+    if ranks.duplicated(keys).any():raise ValueError('Duplicate cases would overweight CRPS.')
+    members=tables['member_values']
+    groups={key:frame for key,frame in members.groupby(keys,sort=False)}
+    rows=[]
+    for row in ranks.loc[ranks.in_common_sample].to_dict('records'):
+        frame=groups.get(tuple(row[key] for key in keys))
+        if frame is None or len(frame)!=ENSEMBLE_SIZE or frame.member.astype(str).nunique()!=ENSEMBLE_SIZE:
+            raise ValueError('CRPS requires all 64 distinct native ensemble members for every scored case.')
+        for name in ('field','pressure_hpa','units'):
+            if name in frame and name in row and not frame[name].eq(row[name]).all():
+                raise ValueError(f'CRPS member/reference {name} metadata differs.')
+        values=frame['value' if 'value' in frame else DIVERGENCE_COLUMN].to_numpy(dtype=float)
+        observed=float(row['era5_value'] if 'era5_value' in row else row['era5_divergence_1e5_s-1'])
+        info={name:row.get(name,'') for name in columns[:15]}
+        info.update(field=row.get('field','divergence'),field_title=row.get('field_title','925-hPa divergence'),
+                    pressure_hpa=row.get('pressure_hpa',925),units=row.get('units','10⁻⁵ s⁻¹'),
+                    reference_product=row.get('reference_product','ERA5'))
+        rows.append(dict(**info,member_count=ENSEMBLE_SIZE,era5_value=observed,
+            crps=empirical_ensemble_crps(values,observed),ensemble_mean=float(values.mean()),
+            ensemble_median=float(np.median(values)),ensemble_min=float(values.min()),
+            ensemble_max=float(values.max()),in_common_sample=True))
+    return pd.DataFrame(rows,columns=columns)
+
+
+def continuous_score_summary(scores):
+    columns=['field','pressure_hpa','units','polygon','lead_days','cases','mean_crps','median_crps',
+             'q25_crps','q75_crps','min_crps','max_crps','era5t_cases','valid_time_start','valid_time_end']
+    if scores.empty:return pd.DataFrame(columns=columns)
+    rows=[]
+    for key,frame in scores.groupby(columns[:5],sort=False):
+        times=pd.to_datetime(frame.valid_time_utc,utc=True)
+        rows.append(dict(zip(columns[:5],key),cases=len(frame),mean_crps=float(frame.crps.mean()),
+            median_crps=float(frame.crps.median()),q25_crps=float(frame.crps.quantile(.25)),
+            q75_crps=float(frame.crps.quantile(.75)),min_crps=float(frame.crps.min()),max_crps=float(frame.crps.max()),
+            era5t_cases=int(frame.reference_product.eq('ERA5T').sum()),valid_time_start=iso_utc(times.min()),
+            valid_time_end=iso_utc(times.max())))
+    return pd.DataFrame(rows,columns=columns)
+
+
+def verification_event_accounting(tables):
+    """One row per selected event: membership, usable leads and full retrieval errors."""
+    status=tables.get('batch_status',pd.DataFrame())
+    ranks=tables['case_ranks']
+    base=status if not status.empty else ranks
+    columns=['event_number','review_key','valid_time_utc','field','pressure_hpa','vortex_classification',
+             'used_in_common_sample','wn2_complete_leads','expected_leads','era5_status','wn2_errors','era5_errors']
+    if base.empty:return pd.DataFrame(columns=columns)
+    complete=set(ranks.loc[ranks.in_common_sample,'review_key']) if not ranks.empty else set()
+    rows=[]
+    for key,frame in base.groupby('review_key',sort=False):
+        first=frame.iloc[0]
+        def joined(name):return ' | '.join(dict.fromkeys(str(x) for x in frame.get(name,[]) if pd.notna(x) and str(x)))
+        good=frame.loc[frame.wn2_status.isin(['cached','computed','complete']),'lead_days'].nunique() if 'wn2_status' in frame else frame.lead_days.nunique()
+        rows.append({**{name:first.get(name,'') for name in columns[:6]},'review_key':key,
+            'used_in_common_sample':key in complete,'wn2_complete_leads':good,'expected_leads':len(LEAD_HOURS),
+            'era5_status':joined('era5_status'),'wn2_errors':joined('wn2_error'),'era5_errors':joined('era5_error')})
+    return pd.DataFrame(rows,columns=columns)
+
+
+def plot_crps_summary(scores, *, title_suffix='All'):
+    """Lead-time comparison and statistics from stored scalar values, without field reads."""
+    import matplotlib.pyplot as plt
+    if scores.empty:raise ValueError('No complete cases for CRPS.')
+    if scores[['field','pressure_hpa','units']].drop_duplicates().shape[0]!=1:
+        raise ValueError('Plot each CRPS variable and level separately.')
+    summary=continuous_score_summary(scores);first=scores.iloc[0]
+    fig=plt.figure(figsize=(13,8.5))
+    grid=fig.add_gridspec(2,2,height_ratios=[3.2,1.7],left=.08,right=.97,top=.79,bottom=.10,hspace=.27,wspace=.28)
+    for column,region in enumerate(POLYGONS):
+        ax=fig.add_subplot(grid[0,column]);table_ax=fig.add_subplot(grid[1,column])
+        region_summary=summary.loc[summary.polygon.eq(region)].set_index('lead_days').reindex([1,5,10])
+        samples=[scores.loc[scores.polygon.eq(region)&scores.lead_days.eq(lead),'crps'].to_numpy() for lead in (1,5,10)]
+        ax.boxplot(samples,positions=[1,5,10],widths=.9,patch_artist=True,
+            boxprops={'facecolor':'#dcebea','edgecolor':'#277f84'},medianprops={'color':'#b06c19','linewidth':1.6},
+            flierprops={'marker':'.','markerfacecolor':'#6e8087','markeredgecolor':'#6e8087','markersize':4})
+        ax.plot([1,5,10],region_summary.mean_crps,'o-',color='#087d78',linewidth=2,label='Mean CRPS')
+        ax.set(xticks=[1,5,10],xticklabels=['1 day','5 days','10 days'],xlim=(0,11),ylim=(0,None),
+               xlabel='Forecast lead',ylabel=f'CRPS ({first.units})',title=region)
+        ax.grid(axis='y',alpha=.22);ax.set_axisbelow(True);ax.legend(frameon=False,loc='upper left')
+        table_ax.axis('off')
+        rows=[['Usable events',*[str(int(x)) for x in region_summary.cases]],
+              ['Mean CRPS',*[f'{x:.3f}' for x in region_summary.mean_crps]],
+              ['Median CRPS',*[f'{x:.3f}' for x in region_summary.median_crps]],
+              ['25th–75th percentile',*[f'{a:.3f}–{b:.3f}' for a,b in zip(region_summary.q25_crps,region_summary.q75_crps)]],
+              ['Preliminary ERA5T cases',*[str(int(x)) for x in region_summary.era5t_cases]]]
+        table=table_ax.table(cellText=rows,colLabels=['Statistic','1 day','5 days','10 days'],
+            colWidths=[.43,.19,.19,.19],cellLoc='left',bbox=[0,0,1,1]);table.auto_set_font_size(False);table.set_fontsize(10)
+        for (r,c),cell in table.get_celld().items():
+            cell.set_edgecolor('#d7e0e7');cell.set_linewidth(.6)
+            if r==0:cell.set_facecolor('#e6eef3');cell.set_text_props(weight='bold')
+            elif r%2==0:cell.set_facecolor('#f5f8fa')
+    fig.suptitle(f'Continuous ranked probability score · {title_suffix}\n{first.field_title}\n'
+                 'All 64 members · same complete events at every lead · lower is better',fontsize=14,y=.975,linespacing=1.5)
+    times=pd.to_datetime(scores.valid_time_utc,utc=True)
+    fig.text(.08,.025,f'Verifying dates: {times.min():%Y-%m-%d} to {times.max():%Y-%m-%d}. '
+             'Boxes: middle 50% of case scores; orange line: median; green line: mean.\n'
+             'CRPS scores the distribution of polygon means. CRPSS awaits an independent climatological reference.',fontsize=9)
+    return fig
+
+
+def export_continuous_scores(tables, destination, *, group='All'):
+    import matplotlib.pyplot as plt
+    destination=Path(destination);destination.mkdir(parents=True,exist_ok=True)
+    scores=continuous_ranked_scores(tables,group=group);summary=continuous_score_summary(scores)
+    scores.to_csv(destination/'crps_cases.csv',index=False);summary.to_csv(destination/'crps_summary.csv',index=False)
+    if scores.empty:
+        for suffix in ('png','pdf'):(destination/f'crps_summary.{suffix}').unlink(missing_ok=True)
+    else:
+        fig=plot_crps_summary(scores,title_suffix=group)
+        for suffix in ('png','pdf'):fig.savefig(destination/f'crps_summary.{suffix}',dpi=180)
+        plt.close(fig)
+    atomic_json_file(destination/'crps_settings.json',dict(group=group,ensemble_members=64,
+        estimator='empirical equally weighted ensemble CDF',units='same units as each selected field',
+        formula='mean(abs(X-y)) - sum_ij(abs(X_i-X_j))/(2*M*M)',
+        sample='common all-lead complete events; instantaneous polygon means',
+        crpss_status='not calculated; independent reference not supplied',
+        source='https://scoringrules.readthedocs.io/en/latest/crps_estimators.html'))
+    return scores,summary
 
 
 def verification_subset(tables, group='All'):
@@ -670,51 +821,131 @@ def reliability_bin_counts(probabilities, *, n_bins=10):
         'panel_cases', 'base_rate', 'brier_score','threshold','direction'])
 
 
-def plot_reliability_diagrams(probabilities, *, n_bins=10, title_suffix='All'):
-    """Six reliability panels and inset probability-count histograms."""
-    import matplotlib.pyplot as plt
+def reliability_panel_statistics(probabilities, *, n_bins=10):
+    """Numbers printed below the diagrams, with the same case/bin accounting as the curve."""
+    columns=['polygon','lead_days','cases','observed_crossings','observed_non_crossings',
+             'base_rate','mean_forecast_probability','brier_score','populated_bins',
+             'probability_bins','valid_time_start','valid_time_end','field','pressure_hpa',
+             'units','threshold','direction','ensemble_members']
+    if probabilities.empty:return pd.DataFrame(columns=columns)
+    counts=reliability_bin_counts(probabilities,n_bins=n_bins)
+    rows=[]
+    for (region,lead),frame in probabilities.groupby(['polygon','lead_days'],sort=False):
+        bins=counts.loc[counts.polygon.eq(region)&counts.lead_days.eq(lead)]
+        times=pd.to_datetime(frame.valid_time_utc,utc=True)
+        hits=int(frame.observed.sum())
+        rows.append(dict(polygon=region,lead_days=int(lead),cases=len(frame),observed_crossings=hits,
+            observed_non_crossings=len(frame)-hits,base_rate=float(frame.observed.mean()),
+            mean_forecast_probability=float(frame.forecast_probability.mean()),
+            brier_score=float(frame.brier_score.mean()),populated_bins=int(bins.case_count.gt(0).sum()),
+            probability_bins=n_bins,valid_time_start=iso_utc(times.min()),valid_time_end=iso_utc(times.max()),
+            field=frame.field.iloc[0],pressure_hpa=int(frame.pressure_hpa.iloc[0]),units=frame.units.iloc[0],
+            threshold=float(frame.threshold.iloc[0]),direction=frame.direction.iloc[0],
+            ensemble_members=int(frame.member_count.iloc[0])))
+    return pd.DataFrame(rows,columns=columns)
 
-    if probabilities.empty:
-        raise ValueError('No complete cases for reliability.')
-    counts = reliability_bin_counts(probabilities, n_bins=n_bins)
-    fig, axes = plt.subplots(2, 3, figsize=(15, 9), layout='constrained')
-    for r, region in enumerate(POLYGONS):
-        for c, lead in enumerate(LEAD_HOURS):
-            ax = axes[r, c]
-            bins = counts.loc[counts.polygon.eq(region) & counts.lead_days.eq(lead // 24)]
+
+def _report_statistics_table(ax, rows, *, widths=(.66,.34)):
+    ax.axis('off')
+    table=ax.table(cellText=rows,colLabels=['Statistic','Value'],colWidths=list(widths),
+                   cellLoc='left',bbox=[0,0,1,1])
+    table.auto_set_font_size(False);table.set_fontsize(10)
+    for (r,c),cell in table.get_celld().items():
+        cell.set_edgecolor('#d7e0e7');cell.set_linewidth(.6);cell.PAD=.08
+        if r==0:cell.set_facecolor('#e6eef3');cell.set_text_props(weight='bold',color='#17324d')
+        elif r%2==0:cell.set_facecolor('#f5f8fa')
+    return table
+
+
+def plot_reliability_diagrams(probabilities, *, n_bins=10, title_suffix='All', region=None,
+                              show_intervals=False):
+    """Readable percent axes and a separate statistics table beneath every panel."""
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.ticker import PercentFormatter
+    if probabilities.empty:raise ValueError('No complete cases for reliability.')
+    regions=list(POLYGONS) if region is None else [region]
+    if any(item not in POLYGONS for item in regions):raise ValueError('Unknown verification polygon.')
+    counts=reliability_bin_counts(probabilities,n_bins=n_bins)
+    statistics=reliability_panel_statistics(probabilities,n_bins=n_bins)
+    fig=plt.figure(figsize=(16,7.7*len(regions)))
+    grid=fig.add_gridspec(2*len(regions),3,height_ratios=[3.5,1.65]*len(regions),
+                          left=.07,right=.975,bottom=.09 if len(regions)==1 else .055,
+                          top=.80 if len(regions)==1 else .89,wspace=.29,hspace=.32)
+    for r,polygon in enumerate(regions):
+        for c,lead in enumerate(LEAD_HOURS):
+            ax=fig.add_subplot(grid[2*r,c]);info_ax=fig.add_subplot(grid[2*r+1,c])
+            bins=counts.loc[counts.polygon.eq(polygon)&counts.lead_days.eq(lead//24)]
+            ax.plot([0,100],[0,100],'--',color='#46515a',linewidth=1.4,zorder=1)
+            ax.set(xlim=(-2,102),ylim=(-2,102),xlabel='Forecast probability',ylabel='Observed frequency (ERA5)',
+                   title=f'{polygon} · {lead//24}-day lead')
+            ax.set_aspect('equal',adjustable='box');ax.set_xticks(range(0,101,20));ax.set_yticks(range(0,101,20))
+            ax.xaxis.set_major_formatter(PercentFormatter(100,decimals=0))
+            ax.yaxis.set_major_formatter(PercentFormatter(100,decimals=0))
+            ax.tick_params(labelsize=10);ax.title.set_fontsize(12);ax.grid(color='#dfe5e9',linewidth=.6)
             if bins.empty:
-                ax.set_title(f'{region} · {lead // 24}-day · No complete cases')
-                continue
-            filled = bins.loc[bins.case_count.gt(0)]
-            x, y = filled.mean_forecast_probability, filled.observed_frequency
-            ax.plot([0, 1], [0, 1], '--', color='.4', linewidth=1)
-            ax.axhline(bins.base_rate.iloc[0], color='.6', linestyle=':', linewidth=1)
-            ax.errorbar(x, y, yerr=np.maximum(0, np.array([y-filled.wilson_lower, filled.wilson_upper-y])),
-                        marker='o', color='#277486', capsize=3)
-            for px, py, n in zip(x, y, filled.case_count):
-                ax.annotate(f'n={n}', (px, py), xytext=(4, 5), textcoords='offset points', fontsize=7)
-            ax.set(xlim=(-.03, 1.03), ylim=(-.03, 1.03), xlabel='Forecast probability',
-                   ylabel='Observed ERA5 frequency',
-                   title=f'{region} · {lead // 24}-day · N={int(bins.panel_cases.iloc[0])}\n'
-                         f'{"<" if bins.direction.iloc[0]=="less" else ">"} {bins["threshold"].iloc[0]:g} '
-                         f'{probabilities["units"].iloc[0] if "units" in probabilities else "10⁻⁵ s⁻¹"} · BS={bins.brier_score.iloc[0]:.3f}')
-            inset = ax.inset_axes([.58, .10, .35, .22])
-            inset.bar((bins.probability_from+bins.probability_through)/2, bins.case_count,
-                      width=.9/n_bins, color='#92b8c1')
-            inset.set(xlim=(0, 1), title='Forecast counts')
-            inset.tick_params(labelsize=6)
-            inset.title.set_fontsize(7)
-    design = probabilities['sample'].iloc[0]
-    description = ('Event-conditioned reliability (ERA5-selected events)'
-                   if design == 'event_conditioned' else 'Scheduled winter reliability (crossings and non-crossings)')
-    field_title = str(probabilities.field_title.iloc[0]) if 'field_title' in probabilities else '925-hPa divergence'
-    fig.suptitle(f'{description} · {title_suffix}\n'
-                 f'Instantaneous {field_title} polygon mean; 64 members; common all-lead cases\n'
-                 'Dashed: perfect reliability · dotted: sample base rate · bars: pointwise Wilson 95% (dependence ignored)')
+                ax.text(.5,.5,'No complete cases',ha='center',transform=ax.transAxes)
+                _report_statistics_table(info_ax,[['Usable cases','0']]);continue
+            # NaNs leave gaps at empty probability bins; no smoothing or invented frequencies.
+            ax.plot(100*bins.mean_forecast_probability,100*bins.observed_frequency,
+                    marker='o',markersize=6,color='#087d78',linewidth=2,zorder=3)
+            ax.axhline(100*bins.base_rate.iloc[0],color='#b06c19',linestyle=':',linewidth=1.4,zorder=2)
+            if show_intervals:
+                filled=bins.loc[bins.case_count.gt(0)]
+                y=100*filled.observed_frequency
+                ax.errorbar(100*filled.mean_forecast_probability,y,
+                    yerr=np.maximum(0,np.array([y-100*filled.wilson_lower,100*filled.wilson_upper-y])),
+                    fmt='none',ecolor='#087d78',alpha=.4,capsize=3,zorder=2)
+            stat=statistics.loc[statistics.polygon.eq(polygon)&statistics.lead_days.eq(lead//24)].iloc[0]
+            _report_statistics_table(info_ax,[['Usable events',str(int(stat.cases))],
+                ['ERA5 threshold crossings',f'{int(stat.observed_crossings)} / {int(stat.cases)}'],
+                ['Observed frequency',f'{stat.base_rate:.1%}'],
+                ['Mean forecast probability',f'{stat.mean_forecast_probability:.1%}'],
+                ['Brier score (lower is better)',f'{stat.brier_score:.3f}'],
+                ['Populated probability bins',f'{int(stat.populated_bins)} / {n_bins}']])
+    first=probabilities.iloc[0];operator='<' if first.direction=='less' else '>'
+    design='ERA5-event-conditioned sample' if first['sample']=='event_conditioned' else 'Scheduled winter sample'
+    threshold_label=(f'{first.threshold:g} × {first.units}' if first.field=='divergence'
+                     else f'{first.threshold:g} {first.units}')
+    fig.suptitle(f'Reliability · {title_suffix}\n{first.field_title}\n'
+                 f'Criterion: polygon mean {operator} {threshold_label} · 64 members · {design}',
+                 fontsize=14,y=.985,linespacing=1.5)
+    handles=[Line2D([],[],color='#087d78',marker='o',linewidth=2,label='Observed reliability'),
+             Line2D([],[],color='#46515a',linestyle='--',label='Perfect reliability'),
+             Line2D([],[],color='#b06c19',linestyle=':',label='Observed frequency in this sample')]
+    fig.legend(handles=handles,loc='center',bbox_to_anchor=(.5,.865 if len(regions)==1 else .935),
+               ncol=3,frameon=False,fontsize=10)
+    times=pd.to_datetime(probabilities.valid_time_utc,utc=True)
+    fig.text(.07,.025,f'Verifying dates: {times.min():%Y-%m-%d} to {times.max():%Y-%m-%d}. '
+             f'Each event contributes once per panel. Bins: {100/n_bins:g} percentage points.\n'
+             'Above the diagonal: probabilities too low; below: probabilities too high. '
+             'Counts and pointwise Wilson 95% intervals are saved separately.',fontsize=9,color='#344858')
     return fig
 
 
-def export_reliability(tables, destination, thresholds, *, sample='event_conditioned', group='All', n_bins=10, direction='less'):
+def plot_forecast_probability_counts(probabilities, *, n_bins=10, title_suffix='All'):
+    """Sharpness/counts companion figure, with no inset inside reliability axes."""
+    import matplotlib.pyplot as plt
+    from matplotlib.ticker import PercentFormatter,MaxNLocator
+    if probabilities.empty:raise ValueError('No complete cases for forecast counts.')
+    counts=reliability_bin_counts(probabilities,n_bins=n_bins)
+    fig,axes=plt.subplots(2,3,figsize=(15,8.5),layout='constrained')
+    for r,region in enumerate(POLYGONS):
+        for c,lead in enumerate(LEAD_HOURS):
+            ax=axes[r,c];bins=counts.loc[counts.polygon.eq(region)&counts.lead_days.eq(lead//24)]
+            ax.bar(50*(bins.probability_from+bins.probability_through),bins.case_count,
+                   width=90/n_bins,color='#277f84',edgecolor='white')
+            ax.set(xlim=(0,100),ylim=(0,None),xlabel='Forecast probability bin',ylabel='Number of events',
+                   title=f'{region} · {lead//24}-day lead · N={int(bins.case_count.sum())}')
+            ax.xaxis.set_major_formatter(PercentFormatter(100,decimals=0));ax.yaxis.set_major_locator(MaxNLocator(integer=True))
+            ax.grid(axis='y',alpha=.2);ax.set_axisbelow(True)
+    fig.suptitle(f'Forecast probability counts · {title_suffix}\n'
+                 'One forecast probability per event, polygon and lead. Empty bins contain no events.',fontsize=14)
+    return fig
+
+
+def export_reliability(tables, destination, thresholds, *, sample='event_conditioned', group='All', n_bins=10,
+                       direction='less', show_intervals=False):
     """Refresh probability tables and plots from the current sample, never append old aggregates."""
     import matplotlib.pyplot as plt
 
@@ -726,21 +957,29 @@ def export_reliability(tables, destination, thresholds, *, sample='event_conditi
     probabilities.to_csv(destination / 'reliability_probabilities.csv', index=False)
     bins.to_csv(destination / 'reliability_bins.csv', index=False)
     if not probabilities.empty:
-        summary = probabilities.groupby(['polygon', 'lead_days'], as_index=False).agg(
-            cases=('observed', 'size'), base_rate=('observed', 'mean'), brier_score=('brier_score', 'mean'))
+        summary = reliability_panel_statistics(probabilities,n_bins=n_bins)
         summary.to_csv(destination / 'reliability_summary.csv', index=False)
-        fig = plot_reliability_diagrams(probabilities, n_bins=n_bins, title_suffix=group)
-        for extension in ('png', 'pdf'):
-            fig.savefig(destination / f'reliability_diagrams.{extension}', dpi=180)
+        figures=[('reliability_diagrams',None),('reliability_jpcz_polygon','JPCZ polygon'),
+                 ('reliability_coastal_wedge','Coastal wedge')]
+        for stem,region in figures:
+            fig=plot_reliability_diagrams(probabilities,n_bins=n_bins,title_suffix=group,region=region,
+                                          show_intervals=show_intervals)
+            for extension in ('png','pdf'):fig.savefig(destination/f'{stem}.{extension}',dpi=180)
+            plt.close(fig)
+        fig=plot_forecast_probability_counts(probabilities,n_bins=n_bins,title_suffix=group)
+        for extension in ('png','pdf'):fig.savefig(destination/f'forecast_probability_counts.{extension}',dpi=180)
         plt.close(fig)
     else:
         # Remove plots from a previous successful run if no current cases remain.
-        for name in ('reliability_summary.csv', 'reliability_diagrams.png', 'reliability_diagrams.pdf'):
+        for name in ('reliability_summary.csv',*[f'{stem}.{ext}' for stem in
+            ('reliability_diagrams','reliability_jpcz_polygon','reliability_coastal_wedge','forecast_probability_counts')
+            for ext in ('png','pdf')]):
             (destination / name).unlink(missing_ok=True)
     atomic_json_file(destination / 'reliability_settings.json', {
         'sample': sample, 'group': group, 'thresholds':thresholds,'direction':direction, 'n_bins': n_bins,
         'criterion': f'instantaneous polygon mean strictly {direction} than threshold',
         'common_sample': 'ERA5 + 64 WN2 members at every lead and both polygons',
-        'not_catalog_D12_event_probability': True,
+        'not_catalog_D12_event_probability': True, 'plot_intervals':show_intervals,
+        'intervals':'pointwise Wilson 95%; serial dependence not modeled',
     })
     return probabilities, bins

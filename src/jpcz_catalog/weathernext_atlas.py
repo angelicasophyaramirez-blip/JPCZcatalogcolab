@@ -670,7 +670,14 @@ def forecast_input_group(archive, store, ds, request, spec, domain, start, end, 
                 path.parent.mkdir(parents=True,exist_ok=True);piece.attrs={'identity':encoded}
                 temporary=path.with_suffix('.tmp.nc');piece.to_netcdf(temporary);temporary.replace(path)
         pieces.append(piece)
-    return xr.merge(pieces,combine_attrs='drop')
+    # combine_attrs='drop' also drops DATA-VARIABLE attrs, including the wind units
+    # required by the derivative/unit checks. Drop only dataset-level cache identity;
+    # the u/v pieces intentionally have different identities.
+    merged=xr.merge(pieces,combine_attrs='drop')
+    for piece in pieces:
+        for name in piece.data_vars:
+            merged[name].attrs=dict(piece[name].attrs)
+    return merged
 
 
 def load_panel(archive, cache_dir, request, member, spec, domain):

@@ -155,7 +155,7 @@ def test_notebook37_pilot_resume_and_exports(tmp_path, use_dask):
     destination = namespace["export_verification"](tables, settings, tmp_path / "pilot")
     workbook = pd.ExcelFile(destination / "ensemble_verification.xlsx")
     assert workbook.sheet_names == ["Case ranks", "Ordered bins", "Member values", "Era5 reference",
-                                    "Batch status", "Ordered values", "Rank bin counts",
+                                    "Batch status", "Ordered values", "Crps cases", "Crps summary", "Event accounting", "Rank bin counts",
                                     "Rank group counts", "Bin counts"]
     assert workbook.parse("Case ranks").era5_rank.tolist() == [13] * 6 + [37] * 6
     assert len(pd.read_csv(destination / "member_values.csv")) == 768

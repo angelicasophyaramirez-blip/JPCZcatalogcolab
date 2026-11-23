@@ -54,15 +54,57 @@ def test_probabilities_edges_empty_bins_and_scores(tmp_path):
     assert equal.loc[equal.event_number.eq(1), 'forecast_probability'].eq(0).all()
     assert equal.loc[equal.event_number.eq(3), 'observed'].eq(0).all()
     fig = v.plot_reliability_diagrams(p)
-    assert len(fig.axes) == 6
+    assert len(fig.axes) == 12  # Six data panels and six tables, with no inset axes.
+    assert all(not ax.child_axes for ax in fig.axes)
+    assert sum(bool(ax.tables) for ax in fig.axes)==6
     fig.savefig(tmp_path / 'reliability.png')
     plt.close(fig)
     tables = {'member_values': members, 'case_ranks': ranks}
     v.export_reliability(tables, tmp_path, thresholds)
     assert (tmp_path / 'reliability_diagrams.pdf').stat().st_size > 0
+    assert (tmp_path / 'forecast_probability_counts.pdf').stat().st_size > 0
+    assert (tmp_path / 'reliability_jpcz_polygon.png').stat().st_size > 0
+    stats=pd.read_csv(tmp_path/'reliability_summary.csv')
+    assert stats.cases.eq(3).all() and stats.observed_crossings.eq(1).all()
+    assert stats.populated_bins.eq(3).all()
     tables['case_ranks'] = ranks.iloc[:0]
     v.export_reliability(tables, tmp_path, thresholds)
     assert not (tmp_path / 'reliability_diagrams.pdf').exists()
+    assert not (tmp_path / 'forecast_probability_counts.pdf').exists()
+
+
+def test_empirical_crps_matches_pairwise_definition_and_preserves_units_and_sign():
+    # Independent direct pairwise expression checks the efficient sorted implementation.
+    values=np.array([-8.,-3.,-3.,0.,7.])
+    observed=-2.
+    expected=np.abs(values-observed).mean()-.5*np.abs(values[:,None]-values[None,:]).mean()
+    assert v.empirical_ensemble_crps(values,observed)==pytest.approx(expected)
+    assert v.empirical_ensemble_crps(-values,-observed)==pytest.approx(expected)
+    assert v.empirical_ensemble_crps(values+1e6,observed+1e6)==pytest.approx(expected)
+    assert v.empirical_ensemble_crps(1e-5*values,1e-5*observed)==pytest.approx(1e-5*expected)
+    assert v.empirical_ensemble_crps([3.],1.)==2.
+    assert v.empirical_ensemble_crps(np.full(64,-2.),-2.)==0.
+    assert v.empirical_ensemble_crps([0.,2.],1.)==.5
+    for bad in ([],[np.nan],[np.inf]):
+        with pytest.raises(ValueError,match='finite'):v.empirical_ensemble_crps(bad,0.)
+
+
+def test_crps_scores_common_cases_from_saved_values_and_exports_statistics(tmp_path):
+    members,ranks=fixtures();ranks.loc[ranks.event_number.eq(3),'in_common_sample']=False
+    tables={'member_values':members,'case_ranks':ranks}
+    scores,summary=v.export_continuous_scores(tables,tmp_path)
+    assert len(scores)==12 and scores.member_count.eq(64).all()
+    assert scores.loc[scores.event_number.eq(1),'crps'].eq(0).all()
+    assert scores.loc[scores.event_number.eq(2),'crps'].eq(.5).all()
+    assert summary.cases.eq(2).all() and summary.mean_crps.eq(.25).all()
+    assert scores.units.eq('10⁻⁵ s⁻¹').all()
+    assert (tmp_path/'crps_summary.pdf').stat().st_size>0
+    assert v.continuous_ranked_scores(tables,group='Non-vortex').empty
+    with pytest.raises(ValueError,match='64 distinct'):
+        v.continuous_ranked_scores({'member_values':members.iloc[1:],'case_ranks':ranks})
+    empty={'member_values':members,'case_ranks':ranks.iloc[:0]}
+    v.export_continuous_scores(empty,tmp_path)
+    assert not (tmp_path/'crps_summary.png').exists()
 
 
 def test_missing_cases_are_excluded_and_unchecked_is_not_nonvortex():

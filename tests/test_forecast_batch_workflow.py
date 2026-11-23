@@ -101,10 +101,39 @@ def test_shared_wind_input_cache_reuses_data_between_divergence_and_native_u(tmp
     request=atlas.forecast_requests(catalog.iloc[0]).iloc[0].to_dict();store,ds=archive.run(request['init_time'])
     domain=atlas.diagnostic_domain(ds,verification.VERIFICATION_DOMAIN)
     first=atlas.forecast_input_group(archive,store,ds,request,atlas.FIELD_PRESETS['divergence'],domain,0,4)
+    assert first.u_component_of_wind.attrs['units']=='m s-1'
+    assert first.v_component_of_wind.attrs['units']=='m s-1'
+    # Exercise the same cache-enabled derivation path as Colab, not just cache contents.
+    derived=atlas.derive_field(first,atlas.FIELD_PRESETS['divergence'],verification.VERIFICATION_DOMAIN)
+    assert np.isfinite(derived.value).all()
     monkeypatch.setattr(atlas,'compact_source_load',lambda *a:(_ for _ in ()).throw(AssertionError('Source reread')))
     cached=atlas.forecast_input_group(archive,store,ds,request,atlas.FIELD_PRESETS['u'],domain,0,4)
     np.testing.assert_array_equal(cached.u_component_of_wind,first.u_component_of_wind)
+    assert cached.u_component_of_wind.attrs['units']=='m s-1'
     assert len(list(tmp_path.glob('input_*.nc')))==2
+
+
+def test_cache_enabled_all_member_verification_preserves_units_on_fresh_and_saved_inputs(tmp_path,monkeypatch):
+    catalog,archive,reference=synthetic_inputs();archive.input_cache_dir=tmp_path/'shared_inputs'
+    first,_=verification.run_ensemble_verification(catalog,archive,tmp_path/'first',
+        era5_reader=lambda:reference,progress=lambda _:None)
+    assert first['case_ranks'].in_common_sample.all()
+    assert first['member_values'].member.nunique()==64
+    assert len(list(archive.input_cache_dir.glob('input_*.nc')))==96
+    import dask.array as da
+    from dask import delayed
+    original_run=archive.run
+    def fail_read():raise AssertionError('Previously cached WN2 input was downloaded again')
+    def unavailable_source(init_time):
+        store,dataset=original_run(init_time)
+        for name in dataset.data_vars:
+            array=dataset[name]
+            dataset[name]=array.copy(data=da.from_delayed(delayed(fail_read)(),shape=array.shape,dtype=array.dtype))
+        return store,dataset
+    archive.run=unavailable_source
+    second,_=verification.run_ensemble_verification(catalog,archive,tmp_path/'second',
+        era5_reader=lambda:reference,progress=lambda _:None)
+    pd.testing.assert_frame_equal(first['case_ranks'],second['case_ranks'])
 
 
 @pytest.mark.parametrize('key,level,units',[('u',925,'m s⁻¹'),('v',925,'m s⁻¹'),('winds',925,'m s⁻¹'),

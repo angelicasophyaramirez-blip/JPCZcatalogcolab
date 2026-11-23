@@ -57,6 +57,12 @@ cells = [
     Run sections 1–5 in this notebook. Its archive reader and rank calculation are included
     below. Each helper cell prints a confirmation when it finishes.
 
+    **CRPS** scores the full 64-member distribution of each polygon's continuous value
+    against ERA5 at the same target. Lower is better; its units match the selected field.
+    Section 5 exports case scores, lead-time summaries and plots from the saved values.
+    **CRPSS** needs the independent climatological reference specified in the study plan;
+    this notebook does not substitute the test events as their own climatology.
+
     The catalog is the same CSV Notebook 35 reads. Notebook 36 supplies the archive reader and
     onset timing rule. You can run this notebook directly using that CSV and your approved
     WeatherNext account. The plotting batches in Notebooks 35 and 36 are optional.
@@ -159,6 +165,8 @@ cells = [
                                  overrides=RUN_OVERRIDES, lazy_indexing=True,
                                  input_cache_dir=DRIVE_ROOT / 'wn2_shared_inputs')
     print(f'{len(catalog)} events in the study window. {RUN_MODE} will process {len(selected)}.')
+    print('Selected merged events by onset year:', catalog.groupby(catalog.event_start.dt.year).size().to_dict())
+    print('Year counts are disjoint; a count after 2024 is already included in the count after 2022.')
     if RUN_MODE == 'Pilot':
         print('Pilot contributes ONE ERA5 rank to each histogram. Choose Catalog to aggregate all selected events.')
     print('Result folder:', result_directory)
@@ -249,6 +257,12 @@ cells = [
     units. Exact rankings use full numerical precision.
     Ties retain the same reproducibly chosen ERA5 position as the graphs.
 
+    **CRPS cases** and **CRPS summary** score the same complete all-lead cases, using all
+    64 signed polygon-mean values. Scores retain the field's units; lower is better.
+    The CRPS figure includes a table of sample size, mean, median, interquartile range
+    and preliminary ERA5T count beneath the lead comparison. **Event accounting** lists
+    every selected event, usable leads, inclusion status and complete retrieval errors.
+
     Both plot versions are exported. **65 ranks** shows all possible positions of ERA5
     within the ensemble. **5 groups** combines 13 consecutive ranks per bar for readability
     with a small event sample. Both use the same calculated ranks and the same set of
@@ -271,6 +285,9 @@ cells = [
     preview = result_directory / ('rank_histograms_65ranks.png' if RANK_DISPLAY == '65 ranks' else 'rank_histograms.png')
     if preview.is_file(): display(Image(filename=str(preview)))
     else: print('No complete common sample yet. Inspect batch_status.csv for missing inputs.')
+    for _run in field_runs:
+        _crps = _run['directory'] / 'crps_summary.png'
+        if _crps.is_file(): display(Image(filename=str(_crps), width=1200))
     """),
     cell("markdown", """
     ## 6 · Reliability diagrams and vortex strata
@@ -292,9 +309,16 @@ cells = [
     independent winter schedule including non-events for broader assessment.
 
     Fixed probability bins include 0 and 1; empty bins remain in the saved tables but
-    are not plotted as zero occurrence. Each diagram includes sample counts, base rate,
-    Brier score, and forecast-count inset. Pointwise Wilson intervals are descriptive;
-    serially related winter times are not independent uncertainty estimates.
+    are not plotted as zero occurrence. Each diagram has percent axes and a statistics
+    table underneath: usable events, observed crossings/frequency, mean forecast probability,
+    Brier score and populated bins. Forecast counts save in a separate companion figure.
+    Wilson 95% intervals remain in the CSVs; the default curve hides them for clarity.
+    They are pointwise descriptive intervals and do not model serial dependence.
+
+    **Read the curve:** the diagonal is perfect reliability. Above it, observed crossings
+    were more frequent than forecast; below it, less frequent. A point uses one probability
+    bin, not one ensemble member. With a small event sample, the curve can be irregular.
+    [ECMWF's reliability-diagram explanation](https://confluence.ecmwf.int/spaces/FUG/pages/673551875/Section%2B12.B%2BStatistical%2BConcepts%2B-%2BProbabilistic%2BData)
 
     Separate All / Vortex / Non-vortex / Unknown outputs use Notebook 35's completed
     screen status. Unchecked or failed screens never enter the Non-vortex stratum.
@@ -303,14 +327,21 @@ cells = [
     cell("code", """
     # @title 6 · Refresh reliability and group ranks from saved scalar values
     SNAPSHOT_THRESHOLD_1E5 = -2.0  # Legacy single-field fallback; VERIFY_FIELDS sets each current field's threshold.
-    PROBABILITY_BINS = 10
+    PROBABILITY_BINS = 5  # Fixed 20-percentage-point bins; use 10 for a finer, sparser diagram.
+    SHOW_FORECAST_COUNTS = False  # Always saved separately; True also displays the count figure.
     _report_runs = globals().get('field_runs', [dict(tables=tables, directory=result_directory,
         config=dict(threshold=SNAPSHOT_THRESHOLD_1E5, direction='less'), id='divergence_925hpa')])
     reliability_folders = export_field_reliability(_report_runs, n_bins=PROBABILITY_BINS)
     from IPython.display import Image, display
     for _folder in reliability_folders:
-        if _folder.name == 'all' and (_folder/'reliability_diagrams.png').is_file():
-            display(Image(filename=str(_folder/'reliability_diagrams.png')))
+        if _folder.name == 'all':
+            for _stem in ('reliability_jpcz_polygon','reliability_coastal_wedge'):
+                _image = _folder / (_stem + '.png')
+                if _image.is_file(): display(Image(filename=str(_image), width=1400))
+            _summary = _folder / 'reliability_summary.csv'
+            if _summary.is_file(): display(pd.read_csv(_summary))
+            if SHOW_FORECAST_COUNTS and (_folder/'forecast_probability_counts.png').is_file():
+                display(Image(filename=str(_folder/'forecast_probability_counts.png'), width=1400))
     """),
     cell("markdown", """
     ## 7 · Scheduled winter reliability, including non-events

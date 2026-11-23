@@ -9,6 +9,7 @@ from .ensemble_verification import (
     run_ensemble_verification, atomic_json_file, export_verification, plot_rank_histograms,
     rank_histogram_counts, export_reliability, verification_subset,
     checkpoint_identity,
+    export_continuous_scores,
 )
 
 SUPPORTED_VERIFICATION_FIELDS=('divergence','u','v','winds','height','geopotential')
@@ -144,11 +145,20 @@ def consolidate_saved_verification(sources, destination):
             for col in ('pressure_hpa','lead_hours'):
                 frame[col]=pd.to_numeric(frame[col],errors='raise').astype('Int64')
             frame=frame.drop_duplicates(keys,keep='first')
+        scores_path=Path(source)/'crps_cases.csv'
+        if scores_path.is_file() and not frame.empty:
+            try:scores=pd.read_csv(scores_path,dtype={'review_key':'string'},float_precision='round_trip')
+            except pd.errors.EmptyDataError:scores=pd.DataFrame()
+            if not scores.empty:
+                keys=['review_key','field','pressure_hpa','polygon','lead_hours']
+                scores=scores[keys+['crps']].rename(columns={'crps':'case_crps'})
+                if scores.duplicated(keys).any():raise ValueError('Duplicate saved CRPS case identities.')
+                frame=frame.drop(columns=['case_crps'],errors='ignore').merge(scores,on=keys,how='left',validate='many_to_one')
         frames.append(frame)
     if not frames:raise ValueError('Select saved result folders to combine.')
     values=pd.concat(frames,ignore_index=True,sort=False)
     preferred=['event_number','review_key','field','pressure_hpa','units','vortex_classification','polygon','lead_days',
-               'valid_time_utc','init_time_utc','source','member','value','position','bin_number','in_common_sample','saved_table']
+               'valid_time_utc','init_time_utc','source','member','value','position','bin_number','in_common_sample','case_crps','saved_table']
     values=values[[c for c in preferred if c in values]+[c for c in values if c not in preferred]]
     values=values.sort_values([c for c in ['event_number','field','pressure_hpa','polygon','lead_days','position'] if c in values])
     if len(values)>1048575:raise ValueError('The combined values exceed one Excel sheet; select fewer saved folders.')
@@ -184,6 +194,9 @@ def export_field_reports(runs, selection_report=None):
         tables,settings,destination=run['tables'],run['settings'],Path(run['directory'])
         if selection_report is not None:tables['event_selection']=selection_report
         export_verification(tables,settings,destination)
+        export_continuous_scores(tables,destination)
+        for group in ('All','Vortex','Non-vortex','Unknown'):
+            export_continuous_scores(tables,destination/'event_conditioned'/group.lower().replace('-','_'),group=group)
         ranks=tables['case_ranks']
         for grouped,stem in ((False,'rank_histograms_65ranks'),(True,'rank_histograms')):
             if not ranks.empty and ranks.in_common_sample.any():

@@ -64,6 +64,49 @@ figures. Reliability requires a field-specific threshold and `less` or `greater`
 `threshold: None` exports values/ranks without inventing a probability criterion.
 Different fields are never pooled into one histogram.
 
+## Continuous scores and readable reliability plots
+
+Notebook 37 section 5 now calculates **empirical ensemble CRPS** from the 64 saved
+polygon-mean values and the matching ERA5 reference. It follows the forecast-CDF versus
+observed-step definition in the proposal, using
+`mean(abs(X-y)) - sum_ij(abs(X_i-X_j))/(2*M*M)`. Scores are nonnegative, lower is better,
+and units match the selected field (10⁻⁵ s⁻¹ for the current signed divergence).
+Replacing divergence D by convergence −D leaves CRPS unchanged. Values are not clipped
+at zero, and a polygon score does not assess the spatial pattern within the polygon.
+
+`crps_cases.csv` retains each scored event/polygon/lead; `crps_summary.csv` and
+`crps_summary.png/pdf` compare the same complete events at every lead. The figure has
+sample size, mean/median CRPS, interquartile range and ERA5T counts underneath.
+The detailed workbook includes those score tables. The one-sheet collector joins the
+saved score as `case_crps`, repeated for each member/reference row belonging to that
+case. All/Vortex/Non-vortex/Unknown CRPS outputs also save under `event_conditioned/`.
+
+**CRPSS is not calculated without an independent reference.** The proposal specifies
+climatology outside the test sample. Test events are not recycled as their own baseline.
+For now, raw CRPS is reported without a skill-against-climatology claim.
+
+Reliability uses percent axes, a clear 45° reference line, and a statistics table below
+each panel: usable cases, observed crossing count/frequency, mean forecast probability,
+Brier score and occupied bins. Notebook display splits the two polygons into separate
+figures with three lead panels each. `forecast_probability_counts.png/pdf` is a separate
+companion figure. Pointwise Wilson 95% intervals remain in `reliability_bins.csv` and
+can optionally be shown; empty bins are not presented as zero observed frequency.
+The summary CSV also records dates, criterion, units and ensemble size.
+
+`event_accounting.csv` lists all selected events, common-sample membership, number of
+usable forecast leads, and full retrieval errors. The catalog preview prints disjoint
+onset-year counts. Counts after 2024 are already within counts after 2022; they must not
+be added together. In the Drive inventory audited on 2026-11-22, 14 events in 2023,
+8 in 2024 and 12 in 2025 gave 34 older cases; five new 2026 cases brought selection to
+39. Forty raw detector fragments become 39 merged events because one episode has two
+fragments. These are audit results, not hard-coded limits.
+
+The new-event wind failure was traced to `xarray.merge(combine_attrs='drop')`, which
+also drops variable-level attributes. Shared cached u/v files retained correct units;
+the merge now restores their variable attributes. Existing valid cached inputs and
+the 34 completed forecast checkpoints remain reusable. This repair does not change
+the divergence formula or invalidate the original results.
+
 Each forecast lead is reduced in four-member source groups. Every group saves its two
 polygon means immediately. The interpreter is recycled after 16 members, so a long
 64-member verification does not retain all of its decoder buffers in one process.
