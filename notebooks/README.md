@@ -40,6 +40,7 @@ Planned order:
 34. `34_historical_ndjf_catalog_1940_2026.ipynb` — separate, resumable full-record historical detector and comparison with the established merged catalog
 35. `35_imerg_manual_case_review.ipynb` — current merged-catalog browser and observational case-review references
 36. `36_weathernext2_jpcz_forecast_atlas.ipynb` — single-member WeatherNext 2 event browser; 500-hPa height and 925-hPa winds at 1-, 5-, and 10-day leads
+39. `39_saved_event_figure_report.ipynb` — Drive-only event PDF assembler: ERA5 -12/peak/+12, then matching saved WN2 maps, grouped by field and pressure level; resumable, with missing-figure audit and future field manifests. See [the run guide](../docs/saved-event-figure-report.md).
 
 Design rule:
 
