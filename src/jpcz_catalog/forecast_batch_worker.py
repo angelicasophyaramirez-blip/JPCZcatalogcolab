@@ -1,5 +1,6 @@
 """Execute one bounded forecast/export job using the bundled, versioned implementation."""
 import json
+import os
 from pathlib import Path
 import resource
 import sys
@@ -44,4 +45,12 @@ def main():
         reply.write_text(json.dumps({'error':f'{type(error).__name__}: {error}'}))
 
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    main()
+    # main() closes all output/checkpoint files before returning. Zarr/gcsfs may
+    # register aiohttp finalizers on a different event loop; interpreter teardown
+    # can print tracebacks or wait on them after a successful result was written.
+    # This single-job process owns no persistent state: flush logs and let the OS
+    # release its sockets/memory. Genuine job errors remain in the checked reply.
+    sys.stdout.flush();sys.stderr.flush()
+    os._exit(0)

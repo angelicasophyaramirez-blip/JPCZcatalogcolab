@@ -26,10 +26,11 @@ def event_panels(*args,**kwargs): return []
 def export_event(*args,**kwargs): raise AssertionError('No rendering in scalar worker tests')
 '''
     verification='''
-import os, resource, sys, time
+import os, resource, sys, time, atexit
 from pathlib import Path
 import numpy as np
 HELD=[]
+atexit.register(lambda: print('deliberate stale async finalizer'))
 def open_verification_era5(): return None
 def era5_polygon_values(time_text,source,**kwargs):
     if time_text=='sleep':time.sleep(30)
@@ -68,12 +69,13 @@ def forecast_payload(tmp_path):
                 request=dict(init_time='2023-01-01T00:00:00Z',valid_time='2023-01-02T00:00:00Z',lead_hours=24))
 
 
-def test_four_fresh_processes_return_all_64_members_and_keep_token_out_of_files(tmp_path):
+def test_four_fresh_processes_return_all_64_members_and_keep_token_out_of_files(tmp_path,capsys):
     result=runner(tmp_path)('forecast',forecast_payload(tmp_path))
     assert result['members']==[str(i) for i in range(64)]
     assert result['values']['JPCZ polygon']==list(range(64))
     peaks=[float(path.read_text()) for path in (tmp_path/'groups').glob('pid_*.json')]
     assert len(peaks)==4 and max(peaks)-min(peaks)<96
+    assert 'deliberate stale async finalizer' not in capsys.readouterr().out
     for path in tmp_path.rglob('*'):
         if path.is_file():assert b'secret-for-pipe-only' not in path.read_bytes()
 

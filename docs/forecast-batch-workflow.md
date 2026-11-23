@@ -120,6 +120,10 @@ credentials remain in the Colab parent; tokens are not saved in Drive, request f
 or command arguments. Children use only the approved WN2 archive and explicit run
 overrides. A content-verified worker archive packages the same implementation embedded
 in the notebooks. Timeout/interruption cleans up its child process.
+After closed checkpoint/result files and flushed logs, each single-job child exits
+directly. This avoids gcsfs/aiohttp finalizers trying to close sessions on a different
+event loop during interpreter teardown. Computation errors remain explicit in the
+validated reply; completed member groups survive an interrupted worker.
 
 ## Reusing Drive outputs without weather recalculation
 
