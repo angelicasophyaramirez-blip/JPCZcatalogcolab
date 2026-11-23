@@ -10,7 +10,9 @@ from .ensemble_verification import (
     rank_histogram_counts, export_reliability, verification_subset,
     checkpoint_identity,
     export_continuous_scores,
+    reliability_probabilities,
 )
+from .corp_reliability import export_corp_reliability
 
 SUPPORTED_VERIFICATION_FIELDS=('divergence','u','v','winds','height','geopotential')
 
@@ -207,9 +209,28 @@ def export_field_reports(runs, selection_report=None):
                 for extension in ('png','pdf'):(destination/f'{stem}.{extension}').unlink(missing_ok=True)
 
 
-def export_field_reliability(runs, *, n_bins=10):
+def _fixed_reliability_matches(folder, probabilities, n_bins):
+    """Reuse the fixed-bin companion when its complete saved case inventory still matches."""
+    try:
+        settings=json.loads((folder/'reliability_settings.json').read_text())
+        if settings.get('n_bins')!=n_bins:return False
+        saved=pd.read_csv(folder/'reliability_probabilities.csv',float_precision='round_trip')
+        if saved.empty and probabilities.empty:return True
+        columns=['review_key','polygon','lead_hours','forecast_probability','observed','threshold','direction','field','pressure_hpa','units','sample']
+        keys=['review_key','polygon','lead_hours']
+        pd.testing.assert_frame_equal(saved[columns].sort_values(keys).reset_index(drop=True),
+            probabilities[columns].sort_values(keys).reset_index(drop=True),check_dtype=False,check_exact=True)
+        stems=['reliability_diagrams','forecast_probability_counts',
+               *[f'reliability_{tag}_lead{lead//24:02d}d' for tag in ('jpcz_polygon','coastal_wedge') for lead in LEAD_HOURS]]
+        return all((folder/f'{stem}.{ext}').is_file() for stem in stems for ext in ('png','pdf'))
+    except (OSError,ValueError,KeyError,AssertionError):return False
+
+
+def export_field_reliability(runs, *, n_bins=10, method='Fixed bins', consistency_bands=False,
+                              assume_exchangeable=False, n_resamples=2000, seed=37):
     """Rebuild calibration figures from saved scalar tables with an explicit per-field criterion."""
     import matplotlib.pyplot as plt
+    if method not in ('Fixed bins','CORP'):raise ValueError('Choose Fixed bins or CORP.')
     folders=[]
     for run in runs:
         threshold=run['config'].get('threshold')
@@ -218,8 +239,15 @@ def export_field_reliability(runs, *, n_bins=10):
             continue
         for group in ('All','Vortex','Non-vortex','Unknown'):
             folder=Path(run['directory'])/'event_conditioned'/group.lower().replace('-','_')
-            p,_=export_reliability(run['tables'],folder,{region:float(threshold) for region in POLYGONS},
-                group=group,n_bins=n_bins,direction=run['config'].get('direction','less'))
+            thresholds={region:float(threshold) for region in POLYGONS}
+            direction=run['config'].get('direction','less')
+            p=reliability_probabilities(run['tables']['member_values'],verification_subset(run['tables'],group),
+                thresholds,direction=direction)
+            if not _fixed_reliability_matches(folder,p,n_bins):
+                p,_=export_reliability(run['tables'],folder,thresholds,group=group,n_bins=n_bins,direction=direction)
+            if method=='CORP':
+                export_corp_reliability(p,folder/'corp',title_suffix=group,consistency_bands=consistency_bands,
+                    assume_exchangeable=assume_exchangeable,n_resamples=n_resamples,seed=seed)
             ranks=verification_subset(run['tables'],group)
             n=0 if ranks.empty else ranks.loc[ranks.in_common_sample,'review_key'].nunique()
             print(f"{run.get('id','Field')} / {group}: {n} complete events; {folder}")
@@ -231,5 +259,5 @@ def export_field_reliability(runs, *, n_bins=10):
                     plt.close(fig)
                 else:
                     for suffix in ('.png','.pdf','_counts.csv'):(folder/(stem+suffix)).unlink(missing_ok=True)
-            folders.append(folder)
+            folders.append(folder/'corp' if method=='CORP' else folder)
     return folders

@@ -129,6 +129,38 @@ validated reply; completed member groups survive an interrupted worker.
 
 ## Reusing Drive outputs without weather recalculation
 
+### CORP calibration view
+
+Notebook 37 section 6 defaults to `RELIABILITY_METHOD = 'CORP'`. Each existing
+`event_conditioned/<stratum>/` retains the fixed-bin figures; its `corp/` subfolder
+contains six separate PNG/vector-PDF diagrams, exact probability-value counts,
+`corp_points.csv`, `corp_cases.csv`, `corp_pools.csv`, `corp_summary.csv` and `corp_settings.json`.
+The source is Dimitriadis, Gneiting and Jordan (2021), doi:10.1073/pnas.2016191118.
+
+Only saved binary forecast probabilities and ERA5 crossing outcomes enter this view.
+No ERA5/WN2 archive reader is called. Tied probability values are aggregated with their
+case counts before weighted PAV; pool boundaries are automatic. Each distinct probability
+is a plotted x-value, using the paper's discrete convention for 64-member probabilities.
+Original p and outcomes remain in the case table alongside fitted diagnostic q.
+The original Brier score, CRPS, rank positions and catalog membership are preserved.
+
+Reported Brier components satisfy BS = MCB − DSC + UNC: MCB is raw BS minus fitted
+in-sample BS; DSC is outcome variance minus fitted BS; UNC is outcome variance.
+These descriptive in-sample components do not establish out-of-sample recalibration
+skill. The base rate used here is not the independent climatology required for CRPSS.
+
+Band defaults are `CORP_CONSISTENCY_BANDS = False` and
+`ASSUME_EXCHANGEABLE_CASES = False`. Explicitly enabling both requests seeded 2,000-draw,
+90% pointwise calibration-null consistency bands at fixed forecast values. These do not
+model winter dependence and are not confidence bands. The curve itself remains available
+without adopting that uncertainty assumption. The paper's serial-dependence discussion
+points to Bröcker and Ben Bouallègue (2020), reference 41, for stratified rank histograms;
+CORP does not replace the continuous-ensemble rank histograms.
+
+Validation compares weighted PAV against SciPy's independent isotonic solver,
+checks tied-value and case-order invariance, and reproduces all four published
+Niamey Brier decompositions in Table 2 using the authors' public example data.
+
 After retrieval, set `LOAD_SAVED_RESULTS_ONLY = True` to reopen the exported CSV tables.
 Missing saved tables cause a clear error; this mode never silently starts a download.
 New catalog cases without saved values are shown as not downloaded. The report cells

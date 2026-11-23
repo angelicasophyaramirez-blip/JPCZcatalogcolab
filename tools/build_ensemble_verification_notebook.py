@@ -28,6 +28,11 @@ verification = (PACKAGE / "ensemble_verification.py").read_text()
 imports = next(node for node in ast.parse(verification).body
                if isinstance(node, ast.ImportFrom) and node.module == "weathernext_atlas")
 verification = verification.replace(ast.get_source_segment(verification, imports), "", 1)
+corp = (PACKAGE/'corp_reliability.py').read_text()
+corp_imports=[ast.get_source_segment(corp,node) for node in ast.parse(corp).body
+              if isinstance(node,ast.ImportFrom) and node.level]
+for source in corp_imports:corp=corp.replace(source,'',1)
+verification += '\n\n'+corp
 workflow = (PACKAGE/'verification_workflow.py').read_text()
 relative_imports=[ast.get_source_segment(workflow,node) for node in ast.parse(workflow).body
                   if isinstance(node,ast.ImportFrom) and node.level]
@@ -308,6 +313,28 @@ cells = [
     selected events, not winter-wide occurrence calibration. Section 7 supplies the
     independent winter schedule including non-events for broader assessment.
 
+    **Default: CORP reliability.** Following [Dimitriadis, Gneiting and Jordan (2021)](https://www.pnas.org/doi/10.1073/pnas.2016191118),
+    weighted isotonic regression/PAV pools adjacent forecast values automatically while
+    constraining estimated crossing frequency to be nondecreasing. The x-axis retains
+    original WN2 probabilities; the y-axis is the fitted conditional ERA5 frequency.
+    With 64 members, probabilities are discrete multiples of 1/64. Plot dots at the
+    observed probability values and connect them as in the paper's discrete setting.
+
+    CORP saves under each stratum's `corp/` subfolder. Fixed-bin diagrams remain alongside
+    it for comparison; choose **Fixed bins** below to display them. Original forecasts,
+    original Brier scores, CRPS and rank histograms are unchanged. CORP's fitted values
+    are an **in-sample diagnostic**, not validated replacement forecasts.
+
+    The table reports case count, distinct probabilities/PAV pools, observed frequency,
+    original Brier score, **MCB** (miscalibration), **DSC** (discrimination), and **UNC**
+    (uncertainty), with the identity **BS = MCB − DSC + UNC**. MCB smaller and DSC larger
+    are favorable; UNC describes the selected outcomes, not model quality.
+
+    Bands default off. Optional **90% pointwise consistency bands** use calibration-null
+    resampling and require explicitly assuming independent/exchangeable cases. They are
+    not confidence bands or simultaneous coverage. The paper cautions about dependent
+    cases and cites rank-histogram work under serial dependence (reference 41).
+
     Fixed probability bins include 0 and 1; empty bins remain in the saved tables but
     are not plotted as zero occurrence. Each diagram has percent axes and a statistics
     table underneath: usable events, observed crossings/frequency, mean forecast probability,
@@ -315,9 +342,9 @@ cells = [
     Wilson 95% intervals remain in the CSVs; the default curve hides them for clarity.
     They are pointwise descriptive intervals and do not model serial dependence.
 
-    **Read the curve:** the diagonal is perfect reliability. Above it, observed crossings
-    were more frequent than forecast; below it, less frequent. A point uses one probability
-    bin, not one ensemble member. With a small event sample, the curve can be irregular.
+    **Read the curve:** the diagonal is perfect reliability. Above it, estimated crossings
+    were more frequent than forecast; below it, less frequent. CORP uses a fitted frequency
+    at each distinct probability; the companion view uses fixed probability bins.
     [ECMWF's reliability-diagram explanation](https://confluence.ecmwf.int/spaces/FUG/pages/673551875/Section%2B12.B%2BStatistical%2BConcepts%2B-%2BProbabilistic%2BData)
 
     Separate All / Vortex / Non-vortex / Unknown outputs use Notebook 35's completed
@@ -328,21 +355,31 @@ cells = [
     # @title 6 · Refresh reliability and group ranks from saved scalar values
     SNAPSHOT_THRESHOLD_1E5 = -2.0  # Legacy single-field fallback; VERIFY_FIELDS sets each current field's threshold.
     PROBABILITY_BINS = 5  # Fixed 20-percentage-point bins; use 10 for a finer, sparser diagram.
+    RELIABILITY_METHOD = 'CORP'  # @param ["CORP", "Fixed bins"]
+    CORP_CONSISTENCY_BANDS = False  # Requires the independent/exchangeable-case assumption below.
+    ASSUME_EXCHANGEABLE_CASES = False  # Keep False for the current clustered winter sample.
     SHOW_FORECAST_COUNTS = False  # Always saved separately; True also displays the count figure.
     _report_runs = globals().get('field_runs', [dict(tables=tables, directory=result_directory,
         config=dict(threshold=SNAPSHOT_THRESHOLD_1E5, direction='less'), id='divergence_925hpa')])
-    reliability_folders = export_field_reliability(_report_runs, n_bins=PROBABILITY_BINS)
+    reliability_folders = export_field_reliability(_report_runs, n_bins=PROBABILITY_BINS, method=RELIABILITY_METHOD,
+        consistency_bands=CORP_CONSISTENCY_BANDS, assume_exchangeable=ASSUME_EXCHANGEABLE_CASES)
     from IPython.display import Image, display
     for _folder in reliability_folders:
-        if _folder.name == 'all':
+        if _folder.name == 'all' or (_folder.name == 'corp' and _folder.parent.name == 'all'):
             for _polygon in ('jpcz_polygon','coastal_wedge'):
                 for _lead in LEAD_HOURS:
-                    _image = _folder / f'reliability_{_polygon}_lead{_lead//24:02d}d.png'
-                    if _image.is_file(): display_saved_verification_image(_image, max_width=800)
-            _summary = _folder / 'reliability_summary.csv'
-            if _summary.is_file(): display(pd.read_csv(_summary))
-            if SHOW_FORECAST_COUNTS and (_folder/'forecast_probability_counts.png').is_file():
-                display_saved_verification_image(_folder/'forecast_probability_counts.png')
+                    _prefix = 'corp' if _folder.name == 'corp' else 'reliability'
+                    _image = _folder / f'{_prefix}_{_polygon}_lead{_lead//24:02d}d.png'
+                    if _image.is_file(): display_saved_verification_image(_image, max_width=1000)
+            _summary = _folder / ('corp_summary.csv' if _folder.name == 'corp' else 'reliability_summary.csv')
+            if _summary.is_file():
+                _statistics = pd.read_csv(_summary)
+                _columns = ['polygon','lead_days','cases','brier_score','miscalibration_mcb','discrimination_dsc','uncertainty_unc']
+                display(_statistics[[c for c in _columns if c in _statistics]].rename(columns={
+                    'polygon':'Region','lead_days':'Lead (days)','cases':'Events','brier_score':'Brier score',
+                    'miscalibration_mcb':'MCB','discrimination_dsc':'DSC','uncertainty_unc':'UNC'}))
+            _counts = _folder / ('corp_forecast_counts.png' if _folder.name == 'corp' else 'forecast_probability_counts.png')
+            if SHOW_FORECAST_COUNTS and _counts.is_file(): display_saved_verification_image(_counts)
     """),
     cell("markdown", """
     ## 7 · Scheduled winter reliability, including non-events
