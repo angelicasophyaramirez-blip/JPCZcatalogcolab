@@ -33,6 +33,12 @@ corp_imports=[ast.get_source_segment(corp,node) for node in ast.parse(corp).body
               if isinstance(node,ast.ImportFrom) and node.level]
 for source in corp_imports:corp=corp.replace(source,'',1)
 verification += '\n\n'+corp
+for module in ('continuous_skill', 'climatology_reference'):
+    embedded = (PACKAGE/f'{module}.py').read_text()
+    for source in [ast.get_source_segment(embedded, node) for node in ast.parse(embedded).body
+                   if isinstance(node, ast.ImportFrom) and node.level]:
+        embedded = embedded.replace(source, '', 1)
+    verification += '\n\n'+embedded
 workflow = (PACKAGE/'verification_workflow.py').read_text()
 relative_imports=[ast.get_source_segment(workflow,node) for node in ast.parse(workflow).body
                   if isinstance(node,ast.ImportFrom) and node.level]
@@ -89,7 +95,7 @@ cells = [
     subprocess.run([sys.executable, '-m', 'pip', 'install', '-q',
                     'numpy>=1.26,<2.4', 'pandas>=2.2,<3', 'xarray>=2026.4,<2027',
                     'zarr>=3.1,<4', 'gcsfs>=2025.3,<2027', 'dask[array]>=2025.1,<2027',
-                    'matplotlib>=3.9,<3.11', 'xlsxwriter>=3.2,<4'], check=True)
+                    'matplotlib>=3.9,<3.11', 'xlsxwriter>=3.2,<4', 'pypdf>=5,<7'], check=True)
     """),
     cell("code", """
     # @title 2 · Connect Google Drive and authenticate for WeatherNext
@@ -293,6 +299,119 @@ cells = [
     for _run in field_runs:
         _crps = _run['directory'] / 'crps_summary.png'
         if _crps.is_file(): display_saved_verification_image(_crps)
+    """),
+    cell("markdown", """
+    ## 5b · Every event's CRPS, from saved scores
+
+    CRPS is calculated **per event, polygon and lead**, using all 64 members. One event
+    contributes six scores: two polygons × three leads. Section 5's boxes summarize all
+    event scores; the orange line is their median, and the teal line is their mean.
+    Those boxes are neither ensemble spread nor confidence intervals on the mean.
+
+    This cell reads `crps_cases.csv`, labels every event in an overview, and saves a
+    separate PNG/PDF/CSV for each event plus **one combined PDF with one event per page**.
+    `one_row_per_event.csv` and `all_event_scores.xlsx` put all six CRPS values on one row.
+    A single-event figure uses six saved scores, without an across-event boxplot.
+    No weather fields or member-level CRPS are recalculated. Repeated runs reuse each
+    unchanged event figure. All exports stay in each field's `case_scores/` folder.
+    """),
+    cell("code", """
+    # @title 5b · Display and export CRPS for every saved event
+    EVENT_CRPS_DISPLAY = 'All events'  # @param ["All events", "Overview only", "One event"]
+    CRPS_EVENT_NUMBER = 0  # @param {type:"integer"} # 0 = first saved event.
+    for _run in field_runs:
+        _score_path = Path(_run['directory'])/'crps_cases.csv'
+        if not _score_path.is_file(): raise FileNotFoundError('Run section 5 to save CRPS first: '+str(_score_path))
+        _event_scores = pd.read_csv(_score_path, float_precision='round_trip')
+        _case_dir = Path(_run['directory'])/'case_scores'
+        _case_index, _case_wide = export_event_crps_reports(_event_scores, _case_dir)
+        print(_run['id'], ':', len(_case_index), 'events;', len(_event_scores), 'saved CRPS values')
+        print('Combined PDF:', _case_dir/'all_events_crps.pdf')
+        print('One Excel row per event:', _case_dir/'all_event_scores.xlsx')
+        display_saved_verification_image(_case_dir/'all_events_crps_overview.png', max_width=1100)
+        display(_case_wide.drop(columns='review_key'))
+        _show = _case_index if EVENT_CRPS_DISPLAY == 'All events' else _case_index.iloc[:0]
+        if EVENT_CRPS_DISPLAY == 'One event':
+            _show = _case_index.head(1) if CRPS_EVENT_NUMBER == 0 else _case_index.loc[_case_index.event_number.eq(CRPS_EVENT_NUMBER)]
+            if _show.empty: print('That event is not in this saved common sample.')
+        for _case in _show.itertuples(): display_saved_verification_image(Path(_case.event_png), max_width=1000)
+    """),
+    cell("markdown", """
+    ## 5c · Independent ERA5 climatology for CRPSS
+
+    Freeze the reference definition before evaluating skill. **Historical JPCZ cases**
+    uses one exact onset-aligned ERA5 target per historical merged event in 2000–2021;
+    this compares performance within an event-selected sample. **All winter conditions**
+    uses every 6-hourly NDJF target and answers a broader climatological comparison.
+    Both use a pooled empirical distribution, equal target weights, and the identical
+    field, pressure level, polygons, units and divergence calculation as verification.
+    The reference period must finish before the earliest evaluated forecast initialization.
+    This does not establish independence of WN2's own training data; checkpoint provenance
+    remains a separate requirement.
+
+    Preview is the default. It reuses saved ERA5 targets and reports how many are missing.
+    For a new reference only, set `BUILD_MISSING_REFERENCE = True` and run in resumable
+    batches. This retrieves **ERA5 only**, one target in a bounded worker, and saves each
+    completed result immediately. WN2 inputs, event scores and forecast checkpoints stay
+    unchanged. Completed targets are skipped on restart; failures are listed explicitly.
+    `REFERENCE_CASES_PER_RUN = None` processes all remaining targets. All-winter sampling
+    has substantially more targets than the historical-event reference.
+    """),
+    cell("code", """
+    # @title 5c · Preview or resume the independent ERA5 reference
+    CLIMATOLOGY_KIND = 'Historical JPCZ cases'  # @param ["Historical JPCZ cases", "All winter conditions"]
+    REFERENCE_START_UTC = '2000-01-01'  # @param {type:"date"}
+    REFERENCE_END_UTC = '2022-01-01'  # @param {type:"date"} # Exclusive: covers through 2021.
+    BUILD_MISSING_REFERENCE = False  # @param {type:"boolean"}
+    REFERENCE_CASES_PER_RUN = 25  # None = all remaining targets; failed targets retry next run.
+    _reference_schedule = climatology_schedule(CATALOG_PATH, kind=CLIMATOLOGY_KIND,
+        start=REFERENCE_START_UTC, end=REFERENCE_END_UTC)
+    climatology_folders = {}
+    for _run in field_runs:
+        _definition, _signature = climatology_definition(_reference_schedule, _run['settings'],
+            kind=CLIMATOLOGY_KIND, start=REFERENCE_START_UTC, end=REFERENCE_END_UTC)
+        _scores = pd.read_csv(Path(_run['directory'])/'crps_cases.csv', float_precision='round_trip')
+        if pd.Timestamp(_definition['end_utc_exclusive']) > pd.to_datetime(_scores.init_time_utc, utc=True).min():
+            raise ValueError('Reference period overlaps evaluated forecast initializations. Choose an earlier reference end.')
+        _folder = OUTPUT_DIR/'climatology'/(_run['id']+'_'+_signature)
+        climatology_folders[_run['id']] = _folder
+        _shared_signature = hashlib.sha256(json.dumps(_run['settings'], sort_keys=True).encode()).hexdigest()[:16]
+        print(_run['id'], ':', len(_reference_schedule), 'frozen reference targets;', _folder)
+        _reference_status = build_saved_climatology(_reference_schedule, _folder, _definition, _run['spec'],
+            job_runner=make_forecast_job_runner(archive) if BUILD_MISSING_REFERENCE else None,
+            download_missing=BUILD_MISSING_REFERENCE, limit=REFERENCE_CASES_PER_RUN,
+            shared_reference_cache=OUTPUT_DIR/'checkpoints'/_shared_signature)
+        print('Status:', _reference_status['completed_targets'], '/', _reference_status['expected_targets'])
+    """),
+    cell("markdown", """
+    ## 5d · CRPSS from paired saved model/reference scores
+
+    **CRPSS (%) = 100 × [1 − mean(model CRPS) / mean(reference CRPS)].** The same
+    complete events enter both means, separately for each polygon and lead. Positive
+    means improvement over this reference; zero means equal scores; negative means worse.
+    Do not average individual-event skill ratios. Per-event CSVs retain both CRPS values
+    and their difference (reference minus model; positive means improvement).
+
+    Until the complete frozen climatology is saved, status is **reference not prepared**
+    or **incomplete**, and no numerical CRPSS is reported. A zero mean reference CRPS
+    makes skill undefined, not zero. This cell does no weather retrieval.
+    [ECMWF's CRPSS definition](https://www.ecmwf.int/en/newsletter/153/meteorology/25-years-ensemble-forecasting-ecmwf)
+    """),
+    cell("code", """
+    # @title 5d · Calculate CRPSS from the completed saved reference
+    if 'climatology_folders' not in globals(): raise RuntimeError('Run the section 5c preview to select the reference folder first.')
+    for _run in field_runs:
+        _scores = pd.read_csv(Path(_run['directory'])/'crps_cases.csv', float_precision='round_trip')
+        _skill_dir = Path(_run['directory'])/'crpss'
+        _skill_status, _paired_scores, _skill_summary = export_crpss_report(_scores,
+            climatology_folders[_run['id']], _skill_dir, _run['settings'])
+        print(_run['id'], ':', _skill_status)
+        if _skill_summary is not None:
+            display(_skill_summary)
+            display_saved_verification_image(_skill_dir/'crpss_summary.png', max_width=1100)
+            _paired_index, _ = export_event_crps_reports(_paired_scores, _skill_dir/'case_scores')
+            print('Per-event WN2/reference comparison PDF:', _skill_dir/'case_scores/all_events_crps.pdf')
+        print('CRPSS outputs:', _skill_dir)
     """),
     cell("markdown", """
     ## 6 · Reliability diagrams and vortex strata

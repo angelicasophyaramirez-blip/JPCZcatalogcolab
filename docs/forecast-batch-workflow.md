@@ -129,6 +129,42 @@ validated reply; completed member groups survive an interrupted worker.
 
 ## Reusing Drive outputs without weather recalculation
 
+### Individual event CRPS and CRPSS
+
+Section 5's CRPS boxplots summarize per-event scores. They are not ensemble-spread
+boxes or confidence intervals. Section 5b reads `crps_cases.csv` and writes all
+event scores to `<field directory>/case_scores/`: one labelled overview, individual
+PNG/PDF/CSV files, `all_events_crps.pdf` (one event per page), and
+`all_event_scores.xlsx` (one sheet, one row per event, six scores per field).
+Each unchanged individual figure is reused by a content signature. A fresh combined
+PDF contains only the current selected events, even if older figures remain on Drive.
+
+Section 5c freezes a historical reference schedule and its spatial/derivative settings.
+The default reference is pooled, equally weighted historical JPCZ targets from
+2000-01-01 through 2021-12-31, evaluated at the same onset-aligned target definition.
+The alternative is every 6-hourly NDJF target in that interval. Changing the reference
+does not turn the event-selected evaluation sample into a winter-wide evaluation.
+The baseline is saved in `weathernext2_ensemble_verification/climatology/<field>_<hash>/`.
+The hash includes the complete schedule and reference definition. Preview mode only
+reads saved scalar/checkpoint values. Turning `BUILD_MISSING_REFERENCE` on retrieves
+ERA5 only, in fresh bounded workers, with a scalar checkpoint after every target.
+`REFERENCE_CASES_PER_RUN` limits new attempts; successful targets survive interruptions
+and are skipped on restart. Missing inputs stay failed/pending, never zero.
+
+Section 5d requires the complete reference schedule, final ERA5, matching field/units,
+pressure, polygons, domain and derivative settings. Reference dates must precede all
+evaluated forecast initializations. CRPSS is `100*(1-mean(model CRPS)/mean(reference CRPS))`
+on identical cases, with equal event weights. Per-case comparisons retain reference
+CRPS and reference-minus-model improvement; they do not average per-case skill ratios.
+A zero mean reference score is undefined. Missing or incomplete reference data produce
+an explicit pending status and remove stale numerical skill outputs.
+
+The `crpss/` folder contains paired case scores, six panel summaries, and PNG/vector-PDF
+figures with statistics beneath them. Its own `case_scores/` folder includes the
+per-event model/reference comparison PDF and a one-row-per-event Excel sheet.
+Neither CRPSS nor any reference period establishes the WN2 checkpoint's training cutoff;
+that provenance must be verified separately before describing independent test skill.
+
 ### CORP calibration view
 
 Notebook 37 section 6 defaults to `RELIABILITY_METHOD = 'CORP'`. Each existing
