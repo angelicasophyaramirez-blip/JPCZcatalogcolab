@@ -678,7 +678,7 @@ def plot_crps_summary(scores, *, title_suffix='All'):
     times=pd.to_datetime(scores.valid_time_utc,utc=True)
     fig.text(.08,.025,f'Verifying dates: {times.min():%Y-%m-%d} to {times.max():%Y-%m-%d}. '
              'Boxes: middle 50% of case scores; orange line: median; green line: mean.\n'
-             'CRPS scores the distribution of polygon means. CRPSS awaits an independent climatological reference.',fontsize=9)
+             'CRPS scores polygon means. CRPSS is reported separately against a complete independent reference.',fontsize=9)
     return fig
 
 
@@ -697,7 +697,7 @@ def export_continuous_scores(tables, destination, *, group='All'):
         estimator='empirical equally weighted ensemble CDF',units='same units as each selected field',
         formula='mean(abs(X-y)) - sum_ij(abs(X_i-X_j))/(2*M*M)',
         sample='common all-lead complete events; instantaneous polygon means',
-        crpss_status='not calculated; independent reference not supplied',
+        crpss_status='reported separately; see crpss/crpss_status.json for reference readiness',
         source='https://scoringrules.readthedocs.io/en/latest/crps_estimators.html'))
     return scores,summary
 
