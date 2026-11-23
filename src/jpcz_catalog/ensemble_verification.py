@@ -858,7 +858,7 @@ def _report_statistics_table(ax, rows, *, widths=(.66,.34)):
 
 
 def plot_reliability_diagrams(probabilities, *, n_bins=10, title_suffix='All', region=None,
-                              show_intervals=False):
+                              show_intervals=False, lead_hours=None):
     """Readable percent axes and a separate statistics table beneath every panel."""
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
@@ -866,14 +866,17 @@ def plot_reliability_diagrams(probabilities, *, n_bins=10, title_suffix='All', r
     if probabilities.empty:raise ValueError('No complete cases for reliability.')
     regions=list(POLYGONS) if region is None else [region]
     if any(item not in POLYGONS for item in regions):raise ValueError('Unknown verification polygon.')
+    leads=list(LEAD_HOURS) if lead_hours is None else [lead_hours]
+    if any(lead not in LEAD_HOURS for lead in leads):raise ValueError('Choose an exact configured forecast lead.')
+    single=len(leads)==1
     counts=reliability_bin_counts(probabilities,n_bins=n_bins)
     statistics=reliability_panel_statistics(probabilities,n_bins=n_bins)
-    fig=plt.figure(figsize=(16,7.7*len(regions)))
-    grid=fig.add_gridspec(2*len(regions),3,height_ratios=[3.5,1.65]*len(regions),
+    fig=plt.figure(figsize=(8 if single else 16,(10.5 if single else 7.7)*len(regions)))
+    grid=fig.add_gridspec(2*len(regions),len(leads),height_ratios=[3.5,1.65]*len(regions),
                           left=.07,right=.975,bottom=.09 if len(regions)==1 else .055,
-                          top=.80 if len(regions)==1 else .89,wspace=.29,hspace=.32)
+                          top=(.72 if single else .80) if len(regions)==1 else .89,wspace=.29,hspace=.32)
     for r,polygon in enumerate(regions):
-        for c,lead in enumerate(LEAD_HOURS):
+        for c,lead in enumerate(leads):
             ax=fig.add_subplot(grid[2*r,c]);info_ax=fig.add_subplot(grid[2*r+1,c])
             bins=counts.loc[counts.polygon.eq(polygon)&counts.lead_days.eq(lead//24)]
             ax.plot([0,100],[0,100],'--',color='#46515a',linewidth=1.4,zorder=1)
@@ -907,19 +910,23 @@ def plot_reliability_diagrams(probabilities, *, n_bins=10, title_suffix='All', r
     design='ERA5-event-conditioned sample' if first['sample']=='event_conditioned' else 'Scheduled winter sample'
     threshold_label=(f'{first.threshold:g} × {first.units}' if first.field=='divergence'
                      else f'{first.threshold:g} {first.units}')
-    fig.suptitle(f'Reliability · {title_suffix}\n{first.field_title}\n'
-                 f'Criterion: polygon mean {operator} {threshold_label} · 64 members · {design}',
+    criterion=f'Criterion: polygon mean {operator} {threshold_label}'
+    header=(f'{criterion}\n64 members · {design}' if single else f'{criterion} · 64 members · {design}')
+    fig.suptitle(f'Reliability · {title_suffix}\n{first.field_title}\n{header}',
                  fontsize=14,y=.985,linespacing=1.5)
     handles=[Line2D([],[],color='#087d78',marker='o',linewidth=2,label='Observed reliability'),
              Line2D([],[],color='#46515a',linestyle='--',label='Perfect reliability'),
              Line2D([],[],color='#b06c19',linestyle=':',label='Observed frequency in this sample')]
-    fig.legend(handles=handles,loc='center',bbox_to_anchor=(.5,.865 if len(regions)==1 else .935),
-               ncol=3,frameon=False,fontsize=10)
+    fig.legend(handles=handles,loc='center',bbox_to_anchor=(.5,(.795 if single else .865) if len(regions)==1 else .935),
+               ncol=1 if single else 3,frameon=False,fontsize=10)
     times=pd.to_datetime(probabilities.valid_time_utc,utc=True)
-    fig.text(.07,.025,f'Verifying dates: {times.min():%Y-%m-%d} to {times.max():%Y-%m-%d}. '
-             f'Each event contributes once per panel. Bins: {100/n_bins:g} percentage points.\n'
-             'Above the diagonal: probabilities too low; below: probabilities too high. '
-             'Counts and pointwise Wilson 95% intervals are saved separately.',fontsize=9,color='#344858')
+    caption=(f'Verifying dates: {times.min():%Y-%m-%d} to {times.max():%Y-%m-%d}. '
+             + ('\n' if single else '')
+             + f'Each event contributes once per panel. Bins: {100/n_bins:g} percentage points.\n'
+             + 'Above the diagonal: probabilities too low; below: probabilities too high. '
+             + ('\n' if single else '')
+             + 'Counts and pointwise Wilson 95% intervals are saved separately.')
+    fig.text(.07,.02,caption,fontsize=9,color='#344858')
     return fig
 
 
@@ -959,11 +966,14 @@ def export_reliability(tables, destination, thresholds, *, sample='event_conditi
     if not probabilities.empty:
         summary = reliability_panel_statistics(probabilities,n_bins=n_bins)
         summary.to_csv(destination / 'reliability_summary.csv', index=False)
-        figures=[('reliability_diagrams',None),('reliability_jpcz_polygon','JPCZ polygon'),
-                 ('reliability_coastal_wedge','Coastal wedge')]
-        for stem,region in figures:
+        figures=[('reliability_diagrams',None,None),('reliability_jpcz_polygon','JPCZ polygon',None),
+                 ('reliability_coastal_wedge','Coastal wedge',None)]
+        figures.extend((f'reliability_{tag}_lead{lead//24:02d}d',polygon,lead)
+                       for tag,polygon in (('jpcz_polygon','JPCZ polygon'),('coastal_wedge','Coastal wedge'))
+                       for lead in LEAD_HOURS)
+        for stem,region,lead in figures:
             fig=plot_reliability_diagrams(probabilities,n_bins=n_bins,title_suffix=group,region=region,
-                                          show_intervals=show_intervals)
+                                          show_intervals=show_intervals,lead_hours=lead)
             for extension in ('png','pdf'):fig.savefig(destination/f'{stem}.{extension}',dpi=180)
             plt.close(fig)
         fig=plot_forecast_probability_counts(probabilities,n_bins=n_bins,title_suffix=group)
@@ -972,7 +982,8 @@ def export_reliability(tables, destination, thresholds, *, sample='event_conditi
     else:
         # Remove plots from a previous successful run if no current cases remain.
         for name in ('reliability_summary.csv',*[f'{stem}.{ext}' for stem in
-            ('reliability_diagrams','reliability_jpcz_polygon','reliability_coastal_wedge','forecast_probability_counts')
+            ('reliability_diagrams','reliability_jpcz_polygon','reliability_coastal_wedge','forecast_probability_counts',
+             *[f'reliability_{tag}_lead{lead//24:02d}d' for tag in ('jpcz_polygon','coastal_wedge') for lead in LEAD_HOURS])
             for ext in ('png','pdf')]):
             (destination / name).unlink(missing_ok=True)
     atomic_json_file(destination / 'reliability_settings.json', {
@@ -983,3 +994,12 @@ def export_reliability(tables, destination, thresholds, *, sample='event_conditi
         'intervals':'pointwise Wilson 95%; serial dependence not modeled',
     })
     return probabilities, bins
+
+
+def display_saved_verification_image(path, *, max_width=960):
+    """Fit a saved PNG to the actual notebook width instead of creating horizontal overflow."""
+    import base64
+    from IPython.display import HTML,display
+    encoded=base64.b64encode(Path(path).read_bytes()).decode('ascii')
+    display(HTML(f'<img src="data:image/png;base64,{encoded}" alt="Saved verification figure" '
+                 f'style="width:100%;max-width:{int(max_width)}px;height:auto;display:block;margin:0 auto;"/>'))

@@ -57,6 +57,10 @@ def test_probabilities_edges_empty_bins_and_scores(tmp_path):
     assert len(fig.axes) == 12  # Six data panels and six tables, with no inset axes.
     assert all(not ax.child_axes for ax in fig.axes)
     assert sum(bool(ax.tables) for ax in fig.axes)==6
+    one=v.plot_reliability_diagrams(p,region='JPCZ polygon',lead_hours=24)
+    assert len(one.axes)==2 and sum(bool(ax.tables) for ax in one.axes)==1
+    assert one.axes[0].get_title()=='JPCZ polygon · 1-day lead'
+    plt.close(one)
     fig.savefig(tmp_path / 'reliability.png')
     plt.close(fig)
     tables = {'member_values': members, 'case_ranks': ranks}
@@ -64,6 +68,7 @@ def test_probabilities_edges_empty_bins_and_scores(tmp_path):
     assert (tmp_path / 'reliability_diagrams.pdf').stat().st_size > 0
     assert (tmp_path / 'forecast_probability_counts.pdf').stat().st_size > 0
     assert (tmp_path / 'reliability_jpcz_polygon.png').stat().st_size > 0
+    assert (tmp_path / 'reliability_jpcz_polygon_lead01d.png').stat().st_size > 0
     stats=pd.read_csv(tmp_path/'reliability_summary.csv')
     assert stats.cases.eq(3).all() and stats.observed_crossings.eq(1).all()
     assert stats.populated_bins.eq(3).all()
@@ -71,6 +76,7 @@ def test_probabilities_edges_empty_bins_and_scores(tmp_path):
     v.export_reliability(tables, tmp_path, thresholds)
     assert not (tmp_path / 'reliability_diagrams.pdf').exists()
     assert not (tmp_path / 'forecast_probability_counts.pdf').exists()
+    assert not (tmp_path / 'reliability_jpcz_polygon_lead01d.png').exists()
 
 
 def test_empirical_crps_matches_pairwise_definition_and_preserves_units_and_sign():

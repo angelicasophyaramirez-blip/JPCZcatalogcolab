@@ -283,11 +283,11 @@ cells = [
     print('One-sheet comparison:', comparison_workbook)
     print('Rows collected from saved ordered/member/reference CSVs; no weather fields recalculated.')
     preview = result_directory / ('rank_histograms_65ranks.png' if RANK_DISPLAY == '65 ranks' else 'rank_histograms.png')
-    if preview.is_file(): display(Image(filename=str(preview)))
+    if preview.is_file(): display_saved_verification_image(preview)
     else: print('No complete common sample yet. Inspect batch_status.csv for missing inputs.')
     for _run in field_runs:
         _crps = _run['directory'] / 'crps_summary.png'
-        if _crps.is_file(): display(Image(filename=str(_crps), width=1200))
+        if _crps.is_file(): display_saved_verification_image(_crps)
     """),
     cell("markdown", """
     ## 6 · Reliability diagrams and vortex strata
@@ -335,13 +335,14 @@ cells = [
     from IPython.display import Image, display
     for _folder in reliability_folders:
         if _folder.name == 'all':
-            for _stem in ('reliability_jpcz_polygon','reliability_coastal_wedge'):
-                _image = _folder / (_stem + '.png')
-                if _image.is_file(): display(Image(filename=str(_image), width=1400))
+            for _polygon in ('jpcz_polygon','coastal_wedge'):
+                for _lead in LEAD_HOURS:
+                    _image = _folder / f'reliability_{_polygon}_lead{_lead//24:02d}d.png'
+                    if _image.is_file(): display_saved_verification_image(_image, max_width=800)
             _summary = _folder / 'reliability_summary.csv'
             if _summary.is_file(): display(pd.read_csv(_summary))
             if SHOW_FORECAST_COUNTS and (_folder/'forecast_probability_counts.png').is_file():
-                display(Image(filename=str(_folder/'forecast_probability_counts.png'), width=1400))
+                display_saved_verification_image(_folder/'forecast_probability_counts.png')
     """),
     cell("markdown", """
     ## 7 · Scheduled winter reliability, including non-events

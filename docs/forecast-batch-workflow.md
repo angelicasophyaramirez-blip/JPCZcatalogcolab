@@ -88,7 +88,9 @@ For now, raw CRPS is reported without a skill-against-climatology claim.
 Reliability uses percent axes, a clear 45° reference line, and a statistics table below
 each panel: usable cases, observed crossing count/frequency, mean forecast probability,
 Brier score and occupied bins. Notebook display splits the two polygons into separate
-figures with three lead panels each. `forecast_probability_counts.png/pdf` is a separate
+figures, one polygon and one lead at a time, fitted responsively to the notebook width.
+The six-panel overview and three-lead polygon figures remain saved for comparison.
+`forecast_probability_counts.png/pdf` is a separate
 companion figure. Pointwise Wilson 95% intervals remain in `reliability_bins.csv` and
 can optionally be shown; empty bins are not presented as zero observed frequency.
 The summary CSV also records dates, criterion, units and ensemble size.
